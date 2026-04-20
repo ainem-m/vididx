@@ -1,0 +1,17 @@
+Analyze the following transcript segment and generate metadata for it.
+
+Transcript ({{ duration_sec }}s, {{ duration_sec|round|int }}s):
+{{ transcript_text }}
+
+Generate a JSON object with the following schema:
+{
+  "title": "<concise title for this segment, max 50 characters>",
+  "summary": "<2-3 sentence summary of the key content>",
+  "keywords": ["<keyword1>", "<keyword2>", "<keyword3>"]
+}
+
+Requirements:
+- Title should be specific and descriptive, capturing the main topic
+- Summary should concisely capture the key points and important information
+- Keywords should be the 3 most important concepts or entities mentioned
+- Return ONLY valid JSON, no markdown or additional text

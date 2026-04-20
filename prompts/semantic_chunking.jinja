@@ -1,0 +1,24 @@
+Analyze the following transcript and identify semantic boundaries where the content shifts to a different topic or theme.
+
+Transcript (duration {{ duration_sec }}s):
+{{ transcript_text }}
+
+Target chunk duration: {{ target_min }}s to {{ target_max }}s
+
+Identify semantic chunks by specifying breakpoints. Return a JSON object with the following schema:
+{
+  "chunks": [
+    {
+      "start_sec": <number>,
+      "end_sec": <number>,
+      "rationale": "<brief explanation of this chunk's semantic content>"
+    }
+  ]
+}
+
+Requirements:
+- Chunks should cover the entire duration [0, {{ duration_sec }}]
+- Each chunk should be between {{ target_min }}s and {{ target_max }}s when possible
+- Breakpoints should align with natural pauses or topic transitions in the transcript
+- Rationales should be concise (1-2 sentences)
+- Return ONLY valid JSON, no markdown or additional text

@@ -1,0 +1,22 @@
+[package]
+name = "vidx-pipeline"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+vidx-core = { path = "../vidx-core" }
+vidx-media = { path = "../vidx-media" }
+vidx-asr = { path = "../vidx-asr" }
+vidx-segment = { path = "../vidx-segment" }
+vidx-output = { path = "../vidx-output" }
+async-trait = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+chrono = { version = "0.4", features = ["serde"] }
+
+[dev-dependencies]
+tempfile = "3"
