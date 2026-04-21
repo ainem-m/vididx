@@ -564,7 +564,7 @@ fn build_chunks(
             Chunk {
                 schema_version: "1.0".to_string(),
                 video_id: ctx.video_id.clone(),
-                source_type: "local_mp4".to_string(),
+                source_type: ctx.source_type.clone(),
                 source_path: source_path.to_string(),
                 source_hash: source_hash.to_string(),
                 chunk_id: chunk.chunk_id.clone(),
@@ -944,6 +944,8 @@ mod tests {
         let manifest = Manifest::new("test_video", "/tmp/test.mp4", "sha256:src", "sha256:cfg");
         let ctx = JobContext {
             video_id: "test_video".to_string(),
+            source_type: "local_mp4".to_string(),
+            source_ref: "/tmp/test.mp4".to_string(),
             source_path: PathBuf::from("/tmp/test.mp4"),
             out_dir: PathBuf::from("/tmp/out"),
             config,
@@ -1003,6 +1005,8 @@ mod tests {
         let manifest = Manifest::new("test_video", "/tmp/test.mp4", "sha256:src", "sha256:cfg");
         let ctx = JobContext {
             video_id: "test_video".to_string(),
+            source_type: "local_mp4".to_string(),
+            source_ref: "/tmp/test.mp4".to_string(),
             source_path: PathBuf::from("/tmp/test.mp4"),
             out_dir: PathBuf::from("/tmp/out"),
             config,

@@ -11,6 +11,8 @@ use vidx_core::Config;
 #[derive(Debug, Clone)]
 pub struct JobContext {
     pub video_id: String,
+    pub source_type: String,
+    pub source_ref: String,
     pub source_path: PathBuf,
     pub out_dir: PathBuf,
     pub config: Config,
@@ -116,6 +118,8 @@ mod tests {
         let manifest = Manifest::new("test_vid", "/path/to/video.mp4", "sha256:vid", "sha256:cfg");
         let ctx = JobContext {
             video_id: "test_vid".to_string(),
+            source_type: "local_mp4".to_string(),
+            source_ref: "/path/to/video.mp4".to_string(),
             source_path: PathBuf::from("/path/to/video.mp4"),
             out_dir: temp_dir.path().to_path_buf(),
             config: Config::default(),

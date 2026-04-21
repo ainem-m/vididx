@@ -1,0 +1,58 @@
+[general]
+out_dir = "./output"
+log_level = "info"
+parallelism = 4
+
+[media]
+ffmpeg_path = "ffmpeg"
+ffprobe_path = "ffprobe"
+audio_sample_rate = 16000
+# URL input is disabled by default. Enable it explicitly when yt-dlp is installed.
+url_downloader = "yt-dlp"
+
+[segment.coarse]
+max_duration_sec = 300.0
+snap_window_sec = 30.0
+
+[segment.semantic]
+target_min_sec = 30.0
+target_max_sec = 90.0
+hard_min_sec = 15.0
+hard_max_sec = 120.0
+
+[frames]
+periodic_interval_sec = 5.0
+scene_change_threshold = 0.4
+max_analyzed_per_chunk = 8
+dhash_distance_threshold = 10
+
+[asr]
+adapter = "whisper_cpp"
+model = "large-v3"
+language = "auto"
+
+[asr.whisper_cpp]
+binary_path = "whisper-cli"
+model_path = "~/.cache/whisper.cpp/ggml-large-v3.bin"
+threads = 8
+
+[vision.ocr]
+adapter = "tesseract"
+languages = ["jpn", "eng"]
+
+[vision.caption]
+adapter = "claude"
+model = "claude-sonnet-4-6"
+max_per_chunk = 3
+
+[llm]
+adapter = "claude"
+model = "claude-sonnet-4-6"
+max_concurrency = 4
+retry_max = 3
+retry_backoff_ms = 1000
+
+[output]
+generate_markdown = true
+generate_jsonl = true
+embedding_text_fields = ["title", "summary", "transcript", "ocr_important"]

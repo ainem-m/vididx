@@ -30,6 +30,7 @@ pub struct MediaConfig {
     pub ffmpeg_path: String,
     pub ffprobe_path: String,
     pub audio_sample_rate: u32,
+    pub url_downloader: Option<String>,
 }
 
 impl Default for MediaConfig {
@@ -38,6 +39,7 @@ impl Default for MediaConfig {
             ffmpeg_path: "ffmpeg".to_string(),
             ffprobe_path: "ffprobe".to_string(),
             audio_sample_rate: 16000,
+            url_downloader: None,
         }
     }
 }
@@ -431,6 +433,7 @@ mod tests {
         assert_eq!(cfg.segment.coarse.max_duration_sec, 300.0);
         assert_eq!(cfg.frames.periodic_interval_sec, 5.0);
         assert_eq!(cfg.llm.max_concurrency, 4);
+        assert_eq!(cfg.media.url_downloader, None);
     }
 
     #[test]
@@ -442,6 +445,9 @@ mod tests {
 [general]
 out_dir = "/custom/out"
 
+[media]
+url_downloader = "yt-dlp"
+
 [segment.coarse]
 max_duration_sec = 600.0
 "#;
@@ -450,6 +456,7 @@ max_duration_sec = 600.0
 
         let cfg = Config::load(Some(&config_path)).unwrap();
         assert_eq!(cfg.general.out_dir, "/custom/out");
+        assert_eq!(cfg.media.url_downloader.as_deref(), Some("yt-dlp"));
         assert_eq!(cfg.segment.coarse.max_duration_sec, 600.0);
         // Not overridden, should keep default
         assert_eq!(cfg.frames.periodic_interval_sec, 5.0);
