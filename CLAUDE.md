@@ -7,7 +7,7 @@
 
 - **言語**: Rust (stable, edition 2024)
 - **非同期**: tokio
-- **成果物**: `vidx` バイナリ + cargo workspace
+- **成果物**: `vididx` バイナリ + cargo workspace
 
 ---
 
@@ -48,21 +48,21 @@
 ## Cargo Workspace 構成
 
 ```
-vidx/
+vididx/
 ├── Cargo.toml            # workspace 定義
 ├── CLAUDE.md             # 本ファイル
 ├── SPEC.md               # 要件定義書(読み取り専用)
-├── vidx.toml.example
+├── vididx.toml.example
 ├── crates/
-│   ├── vidx-core/        # ドメイン型・エラー・設定・ハッシュ
-│   ├── vidx-media/       # ffmpeg/ffprobe ラッパ
-│   ├── vidx-asr/         # 文字起こし adapter
-│   ├── vidx-vision/      # OCR / VLM caption
-│   ├── vidx-segment/     # 粗分割・意味分割・正規化
-│   ├── vidx-llm/         # LLM クライアント・注釈生成
-│   ├── vidx-output/      # JSONL / Markdown 出力
-│   ├── vidx-pipeline/    # Stage trait・manifest・runner
-│   └── vidx-cli/         # バイナリエントリポイント
+│   ├── vididx-core/        # ドメイン型・エラー・設定・ハッシュ
+│   ├── vididx-media/       # ffmpeg/ffprobe ラッパ
+│   ├── vididx-asr/         # 文字起こし adapter
+│   ├── vididx-vision/      # OCR / VLM caption
+│   ├── vididx-segment/     # 粗分割・意味分割・正規化
+│   ├── vididx-llm/         # LLM クライアント・注釈生成
+│   ├── vididx-output/      # JSONL / Markdown 出力
+│   ├── vididx-pipeline/    # Stage trait・manifest・runner
+│   └── vididx-cli/         # バイナリエントリポイント
 ├── prompts/
 │   ├── semantic_chunking.jinja
 │   └── annotate_chunk.jinja
@@ -98,7 +98,7 @@ vidx/
 - **外部依存は必ず trait + Adapter**で抽象化(ffmpeg, whisper.cpp, API等)
 - **Stage間の受け渡しは型付き struct のみ**(HashMap / `serde_json::Value` の素通しは禁止)
 - **各 Stage は idempotent**(同一入力ハッシュならキャッシュヒット)
-- 依存方向: `vidx-cli` → `vidx-pipeline` → 各クレート → `vidx-core`
+- 依存方向: `vididx-cli` → `vididx-pipeline` → 各クレート → `vididx-core`
 
 ---
 
@@ -136,7 +136,7 @@ cargo build --workspace
 cargo test --workspace
 
 # 特定クレートのテスト
-cargo test -p vidx-core
+cargo test -p vididx-core
 
 # lint
 cargo clippy --all-targets -- -D warnings
@@ -158,24 +158,24 @@ cargo fmt -- --check
 
 | ID | タイトル | フェーズ | 状態 |
 |----|---------|---------|------|
-| T-01 | vidx-core: model / error / hash | 1: 基盤 | ✅ 完了 |
-| T-02 | vidx-core: config / config_hash | 1: 基盤 | ✅ 完了 |
-| T-03 | vidx-pipeline: Stage trait / manifest | 1: 基盤 | ✅ 完了 |
-| T-04 | vidx-media: ffprobe ラッパ | 2: メディア層 | ✅ 完了 |
-| T-05 | vidx-media: 音声抽出 (16kHz mono wav) | 2: メディア層 | ✅ 完了 |
-| T-06 | vidx-media: silencedetect | 2: メディア層 | ✅ 完了 |
-| T-07 | vidx-media: scene change 検出 | 2: メディア層 | ✅ 完了 |
-| T-08 | vidx-media: フレーム抽出 | 2: メディア層 | ✅ 完了 |
-| T-09 | vidx-asr: adapter + whisper_cpp | 3: ASR/Vision層 | ✅ 完了 |
-| T-10 | vidx-vision: dHash + tesseract | 3: ASR/Vision層 | ✅ 完了 |
-| T-11 | vidx-vision: Claude VLM caption | 3: ASR/Vision層 | ⚠️ タスク定義なし / コードのみ |
-| T-12 | vidx-segment: 粗分割(coarse) | 4: 分割層 | ✅ 完了 |
-| T-13 | vidx-llm: LLM クライアント | 4: 分割層 | ✅ 完了 |
-| T-14 | vidx-segment: 意味分割(semantic) | 4: 分割層 | ⚠️ 部分実装 |
-| T-15 | vidx-segment: 正規化(normalize) | 4: 分割層 | ✅ 完了 |
+| T-01 | vididx-core: model / error / hash | 1: 基盤 | ✅ 完了 |
+| T-02 | vididx-core: config / config_hash | 1: 基盤 | ✅ 完了 |
+| T-03 | vididx-pipeline: Stage trait / manifest | 1: 基盤 | ✅ 完了 |
+| T-04 | vididx-media: ffprobe ラッパ | 2: メディア層 | ✅ 完了 |
+| T-05 | vididx-media: 音声抽出 (16kHz mono wav) | 2: メディア層 | ✅ 完了 |
+| T-06 | vididx-media: silencedetect | 2: メディア層 | ✅ 完了 |
+| T-07 | vididx-media: scene change 検出 | 2: メディア層 | ✅ 完了 |
+| T-08 | vididx-media: フレーム抽出 | 2: メディア層 | ✅ 完了 |
+| T-09 | vididx-asr: adapter + whisper_cpp | 3: ASR/Vision層 | ✅ 完了 |
+| T-10 | vididx-vision: dHash + tesseract | 3: ASR/Vision層 | ✅ 完了 |
+| T-11 | vididx-vision: Claude VLM caption | 3: ASR/Vision層 | ⚠️ タスク定義なし / コードのみ |
+| T-12 | vididx-segment: 粗分割(coarse) | 4: 分割層 | ✅ 完了 |
+| T-13 | vididx-llm: LLM クライアント | 4: 分割層 | ✅ 完了 |
+| T-14 | vididx-segment: 意味分割(semantic) | 4: 分割層 | ⚠️ 部分実装 |
+| T-15 | vididx-segment: 正規化(normalize) | 4: 分割層 | ✅ 完了 |
 | T-16 | Stage6: フレーム抽出・選別 | 5: パイプライン統合 | ⚠️ 部分実装 |
 | T-17 | Stage7: OCR / VLM | 5: パイプライン統合 | ❌ 未着手 |
 | T-18 | Stage8: 注釈生成 | 5: パイプライン統合 | ⚠️ 部分実装 |
-| T-19 | vidx-output: JSONL / Markdown | 6: 出力層 | ✅ 完了 |
-| T-20 | vidx-pipeline: runner | 6: 出力層 | ⚠️ 部分実装 |
-| T-21 | vidx-cli: バイナリ | 6: 出力層 | ⚠️ 部分実装 |
+| T-19 | vididx-output: JSONL / Markdown | 6: 出力層 | ✅ 完了 |
+| T-20 | vididx-pipeline: runner | 6: 出力層 | ⚠️ 部分実装 |
+| T-21 | vididx-cli: バイナリ | 6: 出力層 | ⚠️ 部分実装 |

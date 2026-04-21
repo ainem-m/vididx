@@ -1,0 +1,79 @@
+[general]
+out_dir = "./output"
+log_level = "info"
+parallelism = 4
+
+[media]
+ffmpeg_path = "ffmpeg"
+ffprobe_path = "ffprobe"
+audio_sample_rate = 16000
+# URL input is disabled by default. Enable it explicitly only if yt-dlp is installed.
+# This only supports yt-dlp-resolvable URLs and simple direct video file links.
+url_downloader = "yt-dlp"
+
+[segment]
+# Segmentation granularity mode:
+#   "utterance" – one chunk per ASR utterance (~5-15s); 1 frame per utterance.
+#                 Ideal for high-precision RAG retrieval. For 2-hour videos this
+#                 produces ~1,000+ chunks; consider disabling stage9 annotation
+#                 ([annotate] enabled = false) to reduce LLM cost.
+#   "semantic"  – heuristic/LLM chunking within coarse segments (default).
+#                 Produces 30-90s chunks; good balance of recall and cost.
+#   "chapter"   – coarse segmentation only (up to 300s). Best for long videos
+#                 where you want broad topic blocks rather than fine retrieval.
+mode = "utterance"
+
+[segment.utterance]
+# Negative value (default) disables gap-based merging; whisper segments are
+# already sentence-level, so 0-gap between them does not mean they should merge.
+# Set to e.g. 0.5 to merge utterances separated by ≤0.5s of silence.
+merge_gap_sec = -1.0
+# Merge an utterance with the next when its duration is shorter than this.
+min_duration_sec = 3.0
+
+[segment.coarse]
+max_duration_sec = 300.0
+snap_window_sec = 30.0
+
+[segment.semantic]
+target_min_sec = 30.0
+target_max_sec = 90.0
+hard_min_sec = 15.0
+hard_max_sec = 120.0
+
+[frames]
+periodic_interval_sec = 5.0
+scene_change_threshold = 0.4
+max_analyzed_per_chunk = 8
+dhash_distance_threshold = 10
+
+[asr]
+adapter = "whisper_cpp"
+model = "large-v3"
+language = "auto"
+
+[asr.whisper_cpp]
+binary_path = "whisper-cli"
+model_path = "~/.cache/whisper.cpp/ggml-large-v3.bin"
+threads = 8
+
+[vision.ocr]
+adapter = "tesseract"
+languages = ["jpn", "eng"]
+
+[vision.caption]
+adapter = "claude"
+model = "claude-sonnet-4-6"
+max_per_chunk = 3
+
+[llm]
+adapter = "claude"
+model = "claude-sonnet-4-6"
+max_concurrency = 4
+retry_max = 3
+retry_backoff_ms = 1000
+
+[output]
+generate_markdown = true
+generate_jsonl = true
+embedding_text_fields = ["title", "summary", "transcript", "ocr_important"]

@@ -2798,7 +2798,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
-name = "vidx-asr"
+name = "vididx-asr"
 version = "0.1.0"
 dependencies = [
  "async-trait",
@@ -2806,11 +2806,11 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tokio",
- "vidx-core",
+ "vididx-core",
 ]
 
 [[package]]
-name = "vidx-cli"
+name = "vididx-cli"
 version = "0.1.0"
 dependencies = [
  "anyhow",
@@ -2819,13 +2819,13 @@ dependencies = [
  "serde_json",
  "tokio",
  "url",
- "vidx-core",
- "vidx-output",
- "vidx-pipeline",
+ "vididx-core",
+ "vididx-output",
+ "vididx-pipeline",
 ]
 
 [[package]]
-name = "vidx-core"
+name = "vididx-core"
 version = "0.1.0"
 dependencies = [
  "chrono",
@@ -2840,7 +2840,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "vidx-llm"
+name = "vididx-llm"
 version = "0.1.0"
 dependencies = [
  "async-trait",
@@ -2848,33 +2848,34 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
- "vidx-core",
+ "vididx-core",
 ]
 
 [[package]]
-name = "vidx-media"
+name = "vididx-media"
 version = "0.1.0"
 dependencies = [
  "regex",
  "serde_json",
  "tempfile",
  "tokio",
- "vidx-core",
+ "vididx-core",
 ]
 
 [[package]]
-name = "vidx-output"
+name = "vididx-output"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "serde",
  "serde_json",
  "tempfile",
  "tokio",
- "vidx-core",
+ "vididx-core",
 ]
 
 [[package]]
-name = "vidx-pipeline"
+name = "vididx-pipeline"
 version = "0.1.0"
 dependencies = [
  "anyhow",
@@ -2885,17 +2886,17 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tokio",
- "vidx-asr",
- "vidx-core",
- "vidx-llm",
- "vidx-media",
- "vidx-output",
- "vidx-segment",
- "vidx-vision",
+ "vididx-asr",
+ "vididx-core",
+ "vididx-llm",
+ "vididx-media",
+ "vididx-output",
+ "vididx-segment",
+ "vididx-vision",
 ]
 
 [[package]]
-name = "vidx-segment"
+name = "vididx-segment"
 version = "0.1.0"
 dependencies = [
  "serde",
@@ -2903,12 +2904,12 @@ dependencies = [
  "tempfile",
  "tera",
  "tokio",
- "vidx-core",
- "vidx-llm",
+ "vididx-core",
+ "vididx-llm",
 ]
 
 [[package]]
-name = "vidx-vision"
+name = "vididx-vision"
 version = "0.1.0"
 dependencies = [
  "async-trait",
@@ -2917,7 +2918,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tokio",
- "vidx-core",
+ "vididx-core",
 ]
 
 [[package]]

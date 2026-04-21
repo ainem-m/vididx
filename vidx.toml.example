@@ -11,6 +11,26 @@ audio_sample_rate = 16000
 # This only supports yt-dlp-resolvable URLs and simple direct video file links.
 url_downloader = "yt-dlp"
 
+[segment]
+# Segmentation granularity mode:
+#   "utterance" – one chunk per ASR utterance (~5-15s); 1 frame per utterance.
+#                 Ideal for high-precision RAG retrieval. For 2-hour videos this
+#                 produces ~1,000+ chunks; consider disabling stage9 annotation
+#                 ([annotate] enabled = false) to reduce LLM cost.
+#   "semantic"  – heuristic/LLM chunking within coarse segments (default).
+#                 Produces 30-90s chunks; good balance of recall and cost.
+#   "chapter"   – coarse segmentation only (up to 300s). Best for long videos
+#                 where you want broad topic blocks rather than fine retrieval.
+mode = "semantic"
+
+[segment.utterance]
+# Negative value (default) disables gap-based merging; whisper segments are
+# already sentence-level, so 0-gap between them does not mean they should merge.
+# Set to e.g. 0.5 to merge utterances separated by ≤0.5s of silence.
+merge_gap_sec = -1.0
+# Merge an utterance with the next when its duration is shorter than this.
+min_duration_sec = 3.0
+
 [segment.coarse]
 max_duration_sec = 300.0
 snap_window_sec = 30.0

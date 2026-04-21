@@ -53,22 +53,22 @@ v2で保留だった4点をデフォルト値として確定。すべて `config
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
-│                    vidx-cli (バイナリ)                        │
+│                    vididx-cli (バイナリ)                        │
 └───────┬──────────────────────────────────────────────────────┘
         │
         ▼
 ┌──────────────────────────────────────────────────────────────┐
-│              vidx-pipeline (オーケストレータ)                 │
+│              vididx-pipeline (オーケストレータ)                 │
 │  Stage0 → Stage1 → Stage2 → Stage3 → Stage4 → Stage5 → ...   │
 └───────┬──────────────────────────────────────────────────────┘
         │
-        ├── vidx-media   (ffmpeg呼び出し / メディア解析)
-        ├── vidx-asr     (文字起こし: whisper.cpp / API)
-        ├── vidx-vision  (OCR / Visual Caption)
-        ├── vidx-segment (粗分割 / 意味分割)
-        ├── vidx-llm    (summary / title / keywords)
-        ├── vidx-output  (JSON / Markdown 生成)
-        └── vidx-core    (ドメイン型 / エラー / 設定)
+        ├── vididx-media   (ffmpeg呼び出し / メディア解析)
+        ├── vididx-asr     (文字起こし: whisper.cpp / API)
+        ├── vididx-vision  (OCR / Visual Caption)
+        ├── vididx-segment (粗分割 / 意味分割)
+        ├── vididx-llm    (summary / title / keywords)
+        ├── vididx-output  (JSON / Markdown 生成)
+        └── vididx-core    (ドメイン型 / エラー / 設定)
 ```
 
 **設計原則**
@@ -83,7 +83,7 @@ v2で保留だった4点をデフォルト値として確定。すべて `config
 
 ## 5. 処理パイプライン(Stage 定義)
 
-各Stageは以下を満たす trait を実装する(`vidx-pipeline::Stage`)。
+各Stageは以下を満たす trait を実装する(`vididx-pipeline::Stage`)。
 
 ```rust
 #[async_trait]
@@ -97,7 +97,7 @@ pub trait Stage {
 }
 ```
 
-### Stage 0: メディア解析 (`vidx-media`)
+### Stage 0: メディア解析 (`vididx-media`)
 
 - **入力**: `mp4ファイルパス`
 - **出力**: `MediaProbe { duration_sec, video_stream, audio_stream, fps, resolution, ... }`
@@ -107,7 +107,7 @@ pub trait Stage {
   - 1時間以内の mp4 で duration が ±0.1秒 誤差内で取得できる
   - 音声トラックなしの動画でも(警告ログを出して)処理継続可能
 
-### Stage 1: 文字起こし (`vidx-asr`)
+### Stage 1: 文字起こし (`vididx-asr`)
 
 - **入力**: `mp4ファイルパス`, `MediaProbe`
 - **出力**: `TranscriptTimeline { segments: Vec<TranscriptSegment> }`
@@ -122,7 +122,7 @@ pub trait Stage {
   - タイムスタンプは単調増加である
   - 各セグメントの `text` は空文字列ではない(空ならセグメントごと除外)
 
-### Stage 2: 補助信号抽出 (`vidx-media` + `vidx-vision`)
+### Stage 2: 補助信号抽出 (`vididx-media` + `vididx-vision`)
 
 並列実行可能な3つのサブStage:
 
@@ -145,7 +145,7 @@ pub trait Stage {
 - **v3では必須実装ではなく**、`TranscriptSegment.speaker` が埋まっていれば交代点を抽出するだけのポストプロセスで良い
 - ASR が diarization 未対応の場合、このサブStageは skip される
 
-### Stage 3: 粗分割 / Coarse Segmentation (`vidx-segment`)
+### Stage 3: 粗分割 / Coarse Segmentation (`vididx-segment`)
 
 - **入力**: `MediaProbe`, `TranscriptTimeline`, `Vec<SilenceInterval>`, `Vec<SceneChange>`
 - **出力**: `Vec<CoarseSegment { index, start_sec, end_sec, transcript_text }>`
@@ -159,7 +159,7 @@ pub trait Stage {
   - 連続する CoarseSegment は `prev.end_sec == next.start_sec`(境界は連続)
   - 動画全体をカバーする(最初の start_sec == 0、最後の end_sec == duration)
 
-### Stage 4: 意味分割 / Semantic Chunking (`vidx-segment` + `vidx-llm`)
+### Stage 4: 意味分割 / Semantic Chunking (`vididx-segment` + `vididx-llm`)
 
 - **入力**: 1つの `CoarseSegment`(並列処理可能)
 - **出力**: `Vec<SemanticChunk { start_sec, end_sec, transcript_text, rationale }>`
@@ -176,7 +176,7 @@ pub trait Stage {
   - LLM がスキーマ違反JSONを返したら1回だけ再試行
   - 再試行も失敗したら、CoarseSegment を目標長で均等分割して警告ログを出す
 
-### Stage 5: 後処理(結合・再分割) (`vidx-segment`)
+### Stage 5: 後処理(結合・再分割) (`vididx-segment`)
 
 - **入力**: `Vec<SemanticChunk>`(全 CoarseSegment 分を連結したもの)
 - **出力**: `Vec<NormalizedChunk>`
@@ -186,7 +186,7 @@ pub trait Stage {
   3. 結合/分割時は transcript_text も整合するように再構築
   4. 最終的にすべてのチャンクに連番 `chunk_id` を付与: `{video_id}_chunk_{NNNN}`
 
-### Stage 6: 画像抽出・選別 (`vidx-media`)
+### Stage 6: 画像抽出・選別 (`vididx-media`)
 
 - **入力**: `MediaProbe`, `Vec<SceneChange>`, `Vec<NormalizedChunk>`
 - **出力**: `Vec<ExtractedFrame { path, at_sec, kind: Periodic|SceneChange, chunk_id }>`
@@ -202,7 +202,7 @@ pub trait Stage {
   - 既定の dHash ハミング距離閾値: 10
   - 解析対象フレームは1チャンクあたり最大8枚(超過分は等間隔で間引き)
 
-### Stage 7: OCR / Visual Caption (`vidx-vision`)
+### Stage 7: OCR / Visual Caption (`vididx-vision`)
 
 - **入力**: Stage6 で「解析対象」とマークされたフレーム群
 - **出力**: `FrameAnalysis { frame_path, ocr_text?, visual_caption? }`
@@ -217,7 +217,7 @@ pub trait Stage {
   - OCRが空文字列 → そのまま空で記録、エラーにしない
   - VLM 呼び出し失敗 → リトライ3回(指数バックオフ)、全失敗なら `visual_caption=null` で続行
 
-### Stage 8: チャンク注釈生成 (`vidx-llm`)
+### Stage 8: チャンク注釈生成 (`vididx-llm`)
 
 - **入力**: `NormalizedChunk` + そのチャンクに紐づく `FrameAnalysis[]`
 - **出力**: `AnnotatedChunk`(title, summary, keywords を付与)
@@ -229,7 +229,7 @@ pub trait Stage {
 - **失敗時**:
   - スキーマ違反 → 1回リトライ → 失敗なら transcript の先頭40文字を title、先頭150文字を summary に fallback
 
-### Stage 9: 出力 (`vidx-output`)
+### Stage 9: 出力 (`vididx-output`)
 
 - **入力**: `Vec<AnnotatedChunk>` + `FrameAnalysis[]`
 - **出力**:
@@ -282,7 +282,7 @@ pub trait Stage {
 }
 ```
 
-### 6.2 Rust 型定義(抜粋、`vidx-core::model`)
+### 6.2 Rust 型定義(抜粋、`vididx-core::model`)
 
 ```rust
 use serde::{Deserialize, Serialize};
@@ -386,10 +386,10 @@ Stage が `done` かつ `input_hash` が一致すれば、そのStageはスキ�
 ## 7. CLI 仕様
 
 ```
-vidx [GLOBAL_OPTS] <COMMAND> [ARGS...]
+vididx [GLOBAL_OPTS] <COMMAND> [ARGS...]
 
 GLOBAL OPTIONS:
-  --config <PATH>        設定ファイルパス(既定: ./vidx.toml → ~/.config/vidx/config.toml)
+  --config <PATH>        設定ファイルパス(既定: ./vididx.toml → ~/.config/vididx/config.toml)
   --log-level <LEVEL>    trace|debug|info|warn|error (既定: info)
   --out-dir <PATH>       出力先ディレクトリ(既定: ./out)
 
@@ -406,10 +406,10 @@ COMMANDS:
   estimate <VIDEO>       処理コスト見積り(秒数・API呼び出し回数・想定料金)
 
 EXAMPLES:
-  vidx process ./sample.mp4
-  vidx process ./sample.mp4 --from stage4_semantic --force
-  vidx process ./sample.mp4 --to stage3_coarse        # 粗分割までで停止
-  vidx estimate ./sample.mp4
+  vididx process ./sample.mp4
+  vididx process ./sample.mp4 --from stage4_semantic --force
+  vididx process ./sample.mp4 --to stage3_coarse        # 粗分割までで停止
+  vididx estimate ./sample.mp4
 ```
 
 ### 7.1 Stage名の正規化
@@ -419,7 +419,7 @@ CLI引数で使う Stage 識別子は manifest の key と同じ:
 
 ---
 
-## 8. 設定ファイル(`vidx.toml`)
+## 8. 設定ファイル(`vididx.toml`)
 
 ```toml
 [general]
@@ -494,29 +494,29 @@ openai_api_key_env = "OPENAI_API_KEY"
 ### 9.1 リポジトリ(cargo workspace)
 
 ```
-vidx/
+vididx/
 ├── Cargo.toml                     # workspace 定義
-├── vidx.toml.example              # 設定ファイルサンプル
+├── vididx.toml.example              # 設定ファイルサンプル
 ├── README.md
 ├── crates/
-│   ├── vidx-core/                 # ドメイン型、エラー、設定ロード
+│   ├── vididx-core/                 # ドメイン型、エラー、設定ロード
 │   │   ├── Cargo.toml
 │   │   └── src/{lib.rs, model.rs, config.rs, error.rs, hash.rs}
-│   ├── vidx-media/                # ffmpeg/ffprobe 呼び出し
+│   ├── vididx-media/                # ffmpeg/ffprobe 呼び出し
 │   │   └── src/{lib.rs, probe.rs, audio.rs, frames.rs, silence.rs, scene.rs}
-│   ├── vidx-asr/                  # 文字起こし
+│   ├── vididx-asr/                  # 文字起こし
 │   │   └── src/{lib.rs, adapter.rs, whisper_cpp.rs, openai.rs}
-│   ├── vidx-vision/               # OCR / VLM
+│   ├── vididx-vision/               # OCR / VLM
 │   │   └── src/{lib.rs, ocr.rs, caption.rs, tesseract.rs, claude_vlm.rs, dhash.rs}
-│   ├── vidx-segment/              # 粗分割 / 意味分割 / 正規化
+│   ├── vididx-segment/              # 粗分割 / 意味分割 / 正規化
 │   │   └── src/{lib.rs, coarse.rs, semantic.rs, normalize.rs}
-│   ├── vidx-llm/                  # summary/title/keywords
+│   ├── vididx-llm/                  # summary/title/keywords
 │   │   └── src/{lib.rs, client.rs, prompts.rs, annotate.rs}
-│   ├── vidx-output/               # JSONL / Markdown
+│   ├── vididx-output/               # JSONL / Markdown
 │   │   └── src/{lib.rs, jsonl.rs, markdown.rs}
-│   ├── vidx-pipeline/             # Stage trait / オーケストレーション / manifest
+│   ├── vididx-pipeline/             # Stage trait / オーケストレーション / manifest
 │   │   └── src/{lib.rs, stage.rs, manifest.rs, runner.rs}
-│   └── vidx-cli/                  # CLI バイナリ
+│   └── vididx-cli/                  # CLI バイナリ
 │       └── src/main.rs
 ├── prompts/
 │   ├── semantic_chunking.jinja
@@ -622,7 +622,7 @@ chrono       = { version = "0.4", features = ["serde"] }
 
 ```rust
 #[derive(Debug, thiserror::Error)]
-pub enum VidxError {
+pub enum VididxError {
     #[error("media error: {0}")]           Media(String),
     #[error("asr error: {0}")]              Asr(String),
     #[error("llm error: {0}")]              Llm(String),
@@ -660,11 +660,11 @@ pub enum VidxError {
 
 全体として、以下がすべて満たされること。
 
-1. **E2E 成功**: サンプル10分動画(fixtures に同梱)を `vidx process` で処理し、chunks.jsonl / index.json / Markdown の3ファイルが生成される
-2. **スキーマ検証**: 生成された全 JSONL 行が `vidx validate` で pass
+1. **E2E 成功**: サンプル10分動画(fixtures に同梱)を `vididx process` で処理し、chunks.jsonl / index.json / Markdown の3ファイルが生成される
+2. **スキーマ検証**: 生成された全 JSONL 行が `vididx validate` で pass
 3. **チャンク粒度**: 全チャンクが `hard_min_sec(15) <= duration <= hard_max_sec(120)` の範囲内
 4. **時刻整合性**: 全チャンクで `start_sec < end_sec`、連続する2チャンクで重複なし(隣接チャンクはgapゼロを強制しない)
-5. **キャッシュ**: 2回目の `vidx process` は全Stageがキャッシュヒットして LLM API を呼び出さない(`--dry-run` で確認可能)
+5. **キャッシュ**: 2回目の `vididx process` は全Stageがキャッシュヒットして LLM API を呼び出さない(`--dry-run` で確認可能)
 6. **部分再実行**: `--from stage4_semantic` で Stage4 以降のみが実行される
 7. **fail-soft**: 意図的に API キーを無効化した状態でも、caption/summary が null/fallback で埋まるだけで全体は完走する
 8. **Markdown 可読性**: 生成 Markdown には時刻アンカー / 画像参照 / summary がすべて含まれる
@@ -675,10 +675,10 @@ pub enum VidxError {
 
 | 種類 | 対象 | 備考 |
 |---|---|---|
-| ユニット | `vidx-segment`(coarse/semantic/normalize), `vidx-core::hash`, `vidx-vision::dhash` | 外部依存なしで全網羅 |
+| ユニット | `vididx-segment`(coarse/semantic/normalize), `vididx-core::hash`, `vididx-vision::dhash` | 外部依存なしで全網羅 |
 | アダプタ契約 | 各 Adapter trait に対してモック実装 | trait レベルで挙動を固定 |
 | ゴールデン | サンプル動画 → 期待 JSONL との差分比較(LLM出力部分は除外しスキーマ/時刻のみ検証) | `tests/fixtures/` |
-| 統合 | `vidx process` の E2E(mock LLM adapter 使用) | CI で実行可能に |
+| 統合 | `vididx process` の E2E(mock LLM adapter 使用) | CI で実行可能に |
 | 負荷 | 2時間動画での完走確認 | nightly 手動 |
 
 ---
@@ -690,48 +690,48 @@ pub enum VidxError {
 
 ### フェーズ1: 基盤(依存なし)
 
-- **T-01**: `vidx-core` の model.rs(全構造体定義) + error.rs(VidxError) + hash.rs(sha256 ヘルパ) を実装。単体テストで各構造体の round-trip serialize/deserialize を確認。
-- **T-02**: `vidx-core::config` で `vidx.toml` を読み込む。欠損キーは既定値、環境変数 > CLI flag > toml > default の優先順位。`config_hash()` も実装。
-- **T-03**: `vidx-pipeline::stage::Stage` trait + `vidx-pipeline::manifest` を実装。ダミーStageで保存/読み込み/キャッシュヒット判定をテスト。
+- **T-01**: `vididx-core` の model.rs(全構造体定義) + error.rs(VididxError) + hash.rs(sha256 ヘルパ) を実装。単体テストで各構造体の round-trip serialize/deserialize を確認。
+- **T-02**: `vididx-core::config` で `vididx.toml` を読み込む。欠損キーは既定値、環境変数 > CLI flag > toml > default の優先順位。`config_hash()` も実装。
+- **T-03**: `vididx-pipeline::stage::Stage` trait + `vididx-pipeline::manifest` を実装。ダミーStageで保存/読み込み/キャッシュヒット判定をテスト。
 
 ### フェーズ2: メディア層(T-01 依存)
 
-- **T-04**: `vidx-media::probe`(ffprobe 呼び出しラッパ)。存在チェック含む。
-- **T-05**: `vidx-media::audio`(mp4 → 16kHz mono wav 抽出)。
-- **T-06**: `vidx-media::silence`(ffmpeg silencedetect のstderr パース)。
-- **T-07**: `vidx-media::scene`(ffmpeg scene change 検出)。
-- **T-08**: `vidx-media::frames`(指定秒数のフレーム抽出、バッチ実行)。
+- **T-04**: `vididx-media::probe`(ffprobe 呼び出しラッパ)。存在チェック含む。
+- **T-05**: `vididx-media::audio`(mp4 → 16kHz mono wav 抽出)。
+- **T-06**: `vididx-media::silence`(ffmpeg silencedetect のstderr パース)。
+- **T-07**: `vididx-media::scene`(ffmpeg scene change 検出)。
+- **T-08**: `vididx-media::frames`(指定秒数のフレーム抽出、バッチ実行)。
 
 ### フェーズ3: ASR / Vision 層(T-01, T-04, T-05 依存)
 
-- **T-09**: `vidx-asr::adapter::AsrAdapter` trait + `whisper_cpp.rs` 実装。
-- **T-10**: `vidx-vision::dhash` + `vidx-vision::ocr::tesseract.rs`。
-- **T-11**: `vidx-vision::caption::claude_vlm.rs`(Anthropic API、base64 画像投入、リトライ)。
+- **T-09**: `vididx-asr::adapter::AsrAdapter` trait + `whisper_cpp.rs` 実装。
+- **T-10**: `vididx-vision::dhash` + `vididx-vision::ocr::tesseract.rs`。
+- **T-11**: `vididx-vision::caption::claude_vlm.rs`(Anthropic API、base64 画像投入、リトライ)。
 
 ### フェーズ4: 分割ロジック(T-01, T-09 依存)
 
-- **T-12**: `vidx-segment::coarse`(ハイブリッド粗分割)。補助信号無しでも動く純粋関数として実装、プロパティテストで不変条件を確認。
-- **T-13**: `vidx-llm::client`(Anthropic Messages API クライアント、JSON mode、リトライ、同時実行制限)。
-- **T-14**: `vidx-segment::semantic`(T-13 を使う、プロンプトは `prompts/semantic_chunking.jinja`)。スキーマ違反時のフォールバックも実装。
-- **T-15**: `vidx-segment::normalize`(短すぎ結合 / 長すぎ再分割 / chunk_id 付与)。純粋関数 + 網羅テスト。
+- **T-12**: `vididx-segment::coarse`(ハイブリッド粗分割)。補助信号無しでも動く純粋関数として実装、プロパティテストで不変条件を確認。
+- **T-13**: `vididx-llm::client`(Anthropic Messages API クライアント、JSON mode、リトライ、同時実行制限)。
+- **T-14**: `vididx-segment::semantic`(T-13 を使う、プロンプトは `prompts/semantic_chunking.jinja`)。スキーマ違反時のフォールバックも実装。
+- **T-15**: `vididx-segment::normalize`(短すぎ結合 / 長すぎ再分割 / chunk_id 付与)。純粋関数 + 網羅テスト。
 
 ### フェーズ5: 注釈 + フレーム選別(T-10, T-11, T-13, T-15 依存)
 
-- **T-16**: `vidx-media::frames` 呼び出し + dHash 選別で `ExtractedFrame` 群を決定する Stage6 実装。
+- **T-16**: `vididx-media::frames` 呼び出し + dHash 選別で `ExtractedFrame` 群を決定する Stage6 実装。
 - **T-17**: Stage7 実装(OCR 全対象、VLM caption は最大3枚/chunk)。
 - **T-18**: Stage8 実装(title/summary/keywords を一括生成、fallback 含む)。
 
 ### フェーズ6: 出力 + オーケストレーション(全前段依存)
 
-- **T-19**: `vidx-output::jsonl`(embedding_text の構築含む) + `vidx-output::markdown`(時刻アンカー付き)。
-- **T-20**: `vidx-pipeline::runner`(Stage0〜9 を連結、キャッシュ判定、進捗表示)。
-- **T-21**: `vidx-cli`(clap で全サブコマンド実装、pre-flight check 含む)。
+- **T-19**: `vididx-output::jsonl`(embedding_text の構築含む) + `vididx-output::markdown`(時刻アンカー付き)。
+- **T-20**: `vididx-pipeline::runner`(Stage0〜9 を連結、キャッシュ判定、進捗表示)。
+- **T-21**: `vididx-cli`(clap で全サブコマンド実装、pre-flight check 含む)。
 
 ### フェーズ7: 品質保証
 
 - **T-22**: E2E テスト(`tests/integration/process_happy_path.rs`) — Mock LLM adapter を注入してサンプル動画を完走させる。
 - **T-23**: ゴールデンテスト — 固定のサンプル動画 + Mock で JSONL 差分比較(LLM生成部は「存在確認」のみ)。
-- **T-24**: `vidx validate` サブコマンドで JSON Schema バリデーション実装。
+- **T-24**: `vididx validate` サブコマンドで JSON Schema バリデーション実装。
 
 ### 依存グラフ(簡略)
 

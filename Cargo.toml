@@ -1,14 +1,14 @@
 [workspace]
 members = [
-    "crates/vidx-core",
-    "crates/vidx-media",
-    "crates/vidx-asr",
-    "crates/vidx-vision",
-    "crates/vidx-segment",
-    "crates/vidx-llm",
-    "crates/vidx-output",
-    "crates/vidx-pipeline",
-    "crates/vidx-cli",
+    "crates/vididx-core",
+    "crates/vididx-media",
+    "crates/vididx-asr",
+    "crates/vididx-vision",
+    "crates/vididx-segment",
+    "crates/vididx-llm",
+    "crates/vididx-output",
+    "crates/vididx-pipeline",
+    "crates/vididx-cli",
 ]
 resolver = "2"
 

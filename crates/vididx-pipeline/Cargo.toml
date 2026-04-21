@@ -1,0 +1,24 @@
+[package]
+name = "vididx-pipeline"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+vididx-core = { path = "../vididx-core" }
+vididx-media = { path = "../vididx-media" }
+vididx-asr = { path = "../vididx-asr" }
+vididx-llm = { path = "../vididx-llm" }
+vididx-segment = { path = "../vididx-segment" }
+vididx-output = { path = "../vididx-output" }
+vididx-vision = { path = "../vididx-vision" }
+async-trait = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+chrono = { version = "0.4", features = ["serde"] }
+
+[dev-dependencies]
+tempfile = "3"

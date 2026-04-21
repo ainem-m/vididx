@@ -1,6 +1,6 @@
-# vidx
+# vididx
 
-`vidx` は、ローカルの mp4 動画を中心に、補助的に `yt-dlp` で解決可能な動画 URL を、RAG 向けの JSONL チャンク群と人間可読な Markdown に変換する Rust 製 CLI です。
+`vididx` は、ローカルの mp4 動画を中心に、補助的に `yt-dlp` で解決可能な動画 URL を、RAG 向けの JSONL チャンク群と人間可読な Markdown に変換する Rust 製 CLI です。
 
 ASR・シーン変化検出・粗分割・意味分割・正規化・出力生成を cargo workspace として分離し、将来的な外部 API / ローカルツール差し替えを前提に設計しています。
 
@@ -19,8 +19,8 @@ ASR・シーン変化検出・粗分割・意味分割・正規化・出力生�
 
 このリポジトリは公開可能な形に整理中ですが、現時点ではまだフル機能版ではありません。
 
-- 実装済み: `vidx-core`, `vidx-media`, `vidx-asr`, `vidx-output`, `vidx-segment` の主要機能
-- 実装済み: `vidx-cli` の基本サブコマンド (`process`, `inspect`, `validate`, `estimate`)
+- 実装済み: `vididx-core`, `vididx-media`, `vididx-asr`, `vididx-output`, `vididx-segment` の主要機能
+- 実装済み: `vididx-cli` の基本サブコマンド (`process`, `inspect`, `validate`, `estimate`)
 - 実装済み: pipeline runner の基本経路、OCR 統合、vision enrich の fail-soft
 - 部分実装: semantic chunking の LLM 統合、注釈生成、`yt-dlp` 経由の URL 入力
 - 未完了: VLM の本統合、CLI の pre-flight check、`--from/--to` の段階実行
@@ -38,7 +38,7 @@ cargo build --workspace
 CLI バイナリは以下で実行できます。
 
 ```bash
-cargo run -p vidx-cli -- --help
+cargo run -p vididx-cli -- --help
 ```
 
 ## 依存ツール
@@ -60,53 +60,53 @@ OCR / VLM 統合や `yt-dlp` 経由の URL 入力では以下も利用します�
 ## クイックスタート
 
 ```bash
-cargo run -p vidx-cli -- process ./sample.mp4
+cargo run -p vididx-cli -- process ./sample.mp4
 ```
 
 `yt-dlp` で解決可能な URL を使う場合:
 
 ```bash
-cargo run -p vidx-cli -- process "https://example.com/path/to/video"
+cargo run -p vididx-cli -- process "https://example.com/path/to/video"
 ```
 
 出力先を指定する場合:
 
 ```bash
-cargo run -p vidx-cli -- process ./sample.mp4 --video-id demo --output ./output/demo
+cargo run -p vididx-cli -- process ./sample.mp4 --video-id demo --output ./output/demo
 ```
 
 生成結果の確認:
 
 ```bash
-cargo run -p vidx-cli -- inspect ./output/demo
-cargo run -p vidx-cli -- validate ./output/demo/demo.chunks.jsonl
+cargo run -p vididx-cli -- inspect ./output/demo
+cargo run -p vididx-cli -- validate ./output/demo/demo.chunks.jsonl
 ```
 
 見積もり:
 
 ```bash
-cargo run -p vidx-cli -- estimate ./sample.mp4
+cargo run -p vididx-cli -- estimate ./sample.mp4
 ```
 
 `yt-dlp` で解決可能な URL を見積もる場合:
 
 ```bash
-cargo run -p vidx-cli -- estimate "https://example.com/path/to/video"
+cargo run -p vididx-cli -- estimate "https://example.com/path/to/video"
 ```
 
 ## サブコマンド
 
 ```text
-vidx process <VIDEO> [--video-id ID] [--from STAGE] [--to STAGE] [--force] [--output DIR]
-vidx inspect <OUT_DIR>
-vidx validate <JSONL>
-vidx estimate <VIDEO>
+vididx process <VIDEO> [--video-id ID] [--from STAGE] [--to STAGE] [--force] [--output DIR]
+vididx inspect <OUT_DIR>
+vididx validate <JSONL>
+vididx estimate <VIDEO>
 ```
 
 注意:
 
 - `--from` / `--to` は CLI 引数としては存在しますが、現状の実装では pipeline に未接続です
-- 設定ファイルの明示指定オプションはまだありません。`Config::load(None)` により `./vidx.toml` または `~/.config/vidx/config.toml` を自動読込します
+- 設定ファイルの明示指定オプションはまだありません。`Config::load(None)` により `./vididx.toml` または `~/.config/vididx/config.toml` を自動読込します
 - URL 入力は既定では無効です。`media.url_downloader = "yt-dlp"` を設定した場合のみ有効になります
 - URL 入力は `yt-dlp` で解決可能な URL と単純な直動画リンクのみを対象とします
 
@@ -135,8 +135,8 @@ JSONL の各行はチャンク単位のレコードで、少なくとも以下�
 
 設定は TOML で上書きできます。現在は以下の探索順です。
 
-1. `./vidx.toml`
-2. `~/.config/vidx/config.toml`
+1. `./vididx.toml`
+2. `~/.config/vididx/config.toml`
 3. どちらも無ければデフォルト設定
 
 最小例:
@@ -173,7 +173,7 @@ URL 入力について:
 - 一般の HTML ページ解析やサイト個別対応は行いません
 - つまり、対応範囲は `yt-dlp` で解決できる URL と単純な直動画リンクに限られます
 
-設定例ファイルは [vidx.toml.example](/Users/ainem/vididx/vidx.toml.example) に置いてあります。
+設定例ファイルは [vididx.toml.example](/Users/ainem/vididx/vididx.toml.example) に置いてあります。
 
 API キーは設定ファイルではなく環境変数から読みます。
 
@@ -201,15 +201,15 @@ cargo clippy --all-targets -- -D warnings
 
 ```text
 crates/
-  vidx-core      ドメイン型、設定、エラー、ハッシュ
-  vidx-media     ffmpeg / ffprobe ラッパ
-  vidx-asr       ASR adapter
-  vidx-vision    OCR / caption / frame enrich
-  vidx-segment   粗分割、意味分割、正規化、fallback 注釈
-  vidx-llm       LLM client
-  vidx-output    JSONL / Markdown 出力
-  vidx-pipeline  stage / manifest / runner
-  vidx-cli       バイナリエントリポイント
+  vididx-core      ドメイン型、設定、エラー、ハッシュ
+  vididx-media     ffmpeg / ffprobe ラッパ
+  vididx-asr       ASR adapter
+  vididx-vision    OCR / caption / frame enrich
+  vididx-segment   粗分割、意味分割、正規化、fallback 注釈
+  vididx-llm       LLM client
+  vididx-output    JSONL / Markdown 出力
+  vididx-pipeline  stage / manifest / runner
+  vididx-cli       バイナリエントリポイント
 ```
 
 ## ライセンス
