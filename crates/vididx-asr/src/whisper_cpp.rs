@@ -13,6 +13,10 @@ pub struct WhisperCppAdapter {
     model_path: String,
     threads: usize,
     language: String,
+    initial_prompt: Option<String>,
+    entropy_thold: f64,
+    no_fallback: bool,
+    suppress_nst: bool,
 }
 
 impl WhisperCppAdapter {
@@ -23,6 +27,24 @@ impl WhisperCppAdapter {
             model_path: expand_tilde(model_path),
             threads,
             language: language.to_string(),
+            initial_prompt: None,
+            entropy_thold: 2.40,
+            no_fallback: false,
+            suppress_nst: false,
+        }
+    }
+
+    /// Create from config.
+    pub fn from_config(cfg: &vididx_core::WhisperCppConfig, language: &str) -> Self {
+        Self {
+            binary_path: cfg.binary_path.clone(),
+            model_path: expand_tilde(&cfg.model_path),
+            threads: cfg.threads,
+            language: language.to_string(),
+            initial_prompt: cfg.initial_prompt.clone(),
+            entropy_thold: cfg.entropy_thold,
+            no_fallback: cfg.no_fallback,
+            suppress_nst: cfg.suppress_nst,
         }
     }
 }
@@ -50,18 +72,29 @@ impl AsrAdapter for WhisperCppAdapter {
         let output_prefix_str = output_prefix.to_string_lossy().to_string();
         let output_json_path = output_prefix.with_extension("json");
 
-        let output = Command::new(&self.binary_path)
-            .arg("-m")
+        let mut cmd = Command::new(&self.binary_path);
+        cmd.arg("-m")
             .arg(&self.model_path)
             .arg("-t")
             .arg(self.threads.to_string())
             .arg("-l")
             .arg(&self.language)
-            .arg("-oj")
-            .arg("-of")
-            .arg(&output_prefix_str)
-            .arg("-f")
-            .arg(wav_path)
+            .arg("--entropy-thold")
+            .arg(self.entropy_thold.to_string());
+
+        if let Some(prompt) = &self.initial_prompt {
+            cmd.arg("--prompt").arg(prompt);
+        }
+        if self.no_fallback {
+            cmd.arg("--no-fallback");
+        }
+        if self.suppress_nst {
+            cmd.arg("--suppress-nst");
+        }
+
+        cmd.arg("-oj").arg("-of").arg(&output_prefix_str).arg("-f").arg(wav_path);
+
+        let output = cmd
             .output()
             .map_err(|e| VididxError::Asr(format!("whisper-cli execution failed: {}", e)))?;
 
@@ -147,7 +180,25 @@ fn parse_whisper_output(json_str: &str) -> Result<TranscriptTimeline, VididxErro
         }
     }
 
-    Ok(TranscriptTimeline { segments })
+    Ok(TranscriptTimeline {
+        segments: dedup_consecutive(segments),
+    })
+}
+
+/// Remove consecutive segments with identical text (whisper hallucination loops).
+/// When a run of duplicates is found, the first occurrence is kept with its end_sec
+/// extended to cover the full run.
+fn dedup_consecutive(segments: Vec<TranscriptSegment>) -> Vec<TranscriptSegment> {
+    let mut out: Vec<TranscriptSegment> = Vec::with_capacity(segments.len());
+    for seg in segments {
+        match out.last_mut() {
+            Some(prev) if prev.text == seg.text => {
+                prev.end_sec = seg.end_sec.max(prev.end_sec);
+            }
+            _ => out.push(seg),
+        }
+    }
+    out
 }
 
 async fn is_tool_available(tool_path: &str) -> bool {

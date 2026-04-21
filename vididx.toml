@@ -21,7 +21,7 @@ url_downloader = "yt-dlp"
 #                 Produces 30-90s chunks; good balance of recall and cost.
 #   "chapter"   – coarse segmentation only (up to 300s). Best for long videos
 #                 where you want broad topic blocks rather than fine retrieval.
-mode = "semantic"
+mode = "utterance"
 
 [segment.utterance]
 # Negative value (default) disables gap-based merging; whisper segments are
@@ -56,6 +56,10 @@ language = "auto"
 binary_path = "whisper-cli"
 model_path = "~/.cache/whisper.cpp/ggml-large-v3.bin"
 threads = 8
+initial_prompt = "Blender for Dental, B4D, B4DEXE, components module, logo designer module, user interface, assets folder, applications directory, installer"
+entropy_thold = 1.80
+no_fallback = false
+suppress_nst = false
 
 [vision.ocr]
 adapter = "tesseract"

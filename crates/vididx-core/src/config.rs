@@ -155,6 +155,14 @@ pub struct WhisperCppConfig {
     pub binary_path: String,
     pub model_path: String,
     pub threads: usize,
+    /// Initial prompt injected before transcription (domain vocabulary, context).
+    pub initial_prompt: Option<String>,
+    /// Entropy threshold for decoder failure detection (default 2.40; lower to suppress hallucination).
+    pub entropy_thold: f64,
+    /// Disable temperature fallback when decoder fails (reduces repetition loops).
+    pub no_fallback: bool,
+    /// Suppress non-speech tokens (music, laughter, etc.).
+    pub suppress_nst: bool,
 }
 
 impl Default for WhisperCppConfig {
@@ -163,6 +171,10 @@ impl Default for WhisperCppConfig {
             binary_path: "whisper-cli".to_string(),
             model_path: "~/.cache/whisper.cpp/ggml-large-v3.bin".to_string(),
             threads: 8,
+            initial_prompt: None,
+            entropy_thold: 2.40,
+            no_fallback: false,
+            suppress_nst: false,
         }
     }
 }

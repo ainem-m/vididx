@@ -406,12 +406,7 @@ async fn transcribe_or_empty(
         return TranscriptTimeline { segments: vec![] };
     }
 
-    let adapter = WhisperCppAdapter::new(
-        &ctx.config.asr.whisper_cpp.binary_path,
-        &ctx.config.asr.whisper_cpp.model_path,
-        ctx.config.asr.whisper_cpp.threads,
-        &ctx.config.asr.language,
-    );
+    let adapter = WhisperCppAdapter::from_config(&ctx.config.asr.whisper_cpp, &ctx.config.asr.language);
 
     match adapter.transcribe(audio_path).await {
         Ok(timeline) => timeline,
