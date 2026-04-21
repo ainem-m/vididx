@@ -1,12 +1,13 @@
 # vidx
 
-`vidx` は、ローカルの mp4 動画または取得可能な動画 URL を、RAG 向けの JSONL チャンク群と人間可読な Markdown に変換する Rust 製 CLI です。
+`vidx` は、ローカルの mp4 動画を中心に、補助的に `yt-dlp` で解決可能な動画 URL を、RAG 向けの JSONL チャンク群と人間可読な Markdown に変換する Rust 製 CLI です。
 
 ASR・シーン変化検出・粗分割・意味分割・正規化・出力生成を cargo workspace として分離し、将来的な外部 API / ローカルツール差し替えを前提に設計しています。
 
 ## 何ができるか
 
-- mp4 または動画 URL を入力にして retrieval-ready な JSONL を生成
+- ローカル mp4 を入力にして retrieval-ready な JSONL を生成
+- 補助機能として `yt-dlp` で解決可能な動画 URL も処理可能
 - チャンクごとの Markdown サマリを生成
 - `ffprobe` によるメディア解析
 - `ffmpeg` による音声抽出、無音検出、シーン変化検出、フレーム抽出
@@ -21,7 +22,7 @@ ASR・シーン変化検出・粗分割・意味分割・正規化・出力生�
 - 実装済み: `vidx-core`, `vidx-media`, `vidx-asr`, `vidx-output`, `vidx-segment` の主要機能
 - 実装済み: `vidx-cli` の基本サブコマンド (`process`, `inspect`, `validate`, `estimate`)
 - 実装済み: pipeline runner の基本経路、OCR 統合、vision enrich の fail-soft
-- 部分実装: semantic chunking の LLM 統合、注釈生成、URL 入力
+- 部分実装: semantic chunking の LLM 統合、注釈生成、`yt-dlp` 経由の URL 入力
 - 未完了: VLM の本統合、CLI の pre-flight check、`--from/--to` の段階実行
 
 現状の `run_pipeline` は一連の出力を生成できますが、一部ステージはヒューリスティックまたは fallback 実装です。
@@ -48,7 +49,7 @@ cargo run -p vidx-cli -- --help
 - `ffprobe`
 - `whisper-cli` (`whisper.cpp`)
 
-OCR / VLM 統合や URL 入力では以下も利用します。
+OCR / VLM 統合や `yt-dlp` 経由の URL 入力では以下も利用します。
 
 - `tesseract`
 - `yt-dlp` (`media.url_downloader = "yt-dlp"` を設定した場合のみ)
@@ -62,7 +63,7 @@ OCR / VLM 統合や URL 入力では以下も利用します。
 cargo run -p vidx-cli -- process ./sample.mp4
 ```
 
-URL 入力を使う場合:
+`yt-dlp` で解決可能な URL を使う場合:
 
 ```bash
 cargo run -p vidx-cli -- process "https://example.com/path/to/video"
@@ -87,7 +88,7 @@ cargo run -p vidx-cli -- validate ./output/demo/demo.chunks.jsonl
 cargo run -p vidx-cli -- estimate ./sample.mp4
 ```
 
-URL を見積もる場合:
+`yt-dlp` で解決可能な URL を見積もる場合:
 
 ```bash
 cargo run -p vidx-cli -- estimate "https://example.com/path/to/video"
@@ -107,6 +108,7 @@ vidx estimate <VIDEO>
 - `--from` / `--to` は CLI 引数としては存在しますが、現状の実装では pipeline に未接続です
 - 設定ファイルの明示指定オプションはまだありません。`Config::load(None)` により `./vidx.toml` または `~/.config/vidx/config.toml` を自動読込します
 - URL 入力は既定では無効です。`media.url_downloader = "yt-dlp"` を設定した場合のみ有効になります
+- URL 入力は `yt-dlp` で解決可能な URL と単純な直動画リンクのみを対象とします
 
 ## 出力物
 
@@ -168,7 +170,8 @@ URL 入力について:
 - `media.url_downloader = "yt-dlp"` を設定すると `process <URL>` と `estimate <URL>` が有効になります
 - 取得時はまず `yt-dlp` を試します
 - `yt-dlp` が失敗した場合、URL が直動画リンクっぽいか `HEAD` が `video/*` を返すときだけ `direct-http` に fallback します
-- 一般の HTML ページ解析は行いません
+- 一般の HTML ページ解析やサイト個別対応は行いません
+- つまり、対応範囲は `yt-dlp` で解決できる URL と単純な直動画リンクに限られます
 
 設定例ファイルは [vidx.toml.example](/Users/ainem/vididx/vidx.toml.example) に置いてあります。
 

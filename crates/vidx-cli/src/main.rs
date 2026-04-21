@@ -25,7 +25,7 @@ struct Cli {
 enum Commands {
     /// Process a video through the pipeline
     Process {
-        /// Path or URL to the video
+        /// Path to a local video file, or a URL resolvable by yt-dlp
         video: String,
 
         /// Video ID (default: filename without extension)
@@ -63,7 +63,7 @@ enum Commands {
 
     /// Estimate processing time and disk space for a video
     Estimate {
-        /// Path or URL to the video
+        /// Path to a local video file, or a URL resolvable by yt-dlp
         video: String,
     },
 }
@@ -349,9 +349,13 @@ fn estimate_input(
 fn configured_url_downloader(config: &Config) -> Result<&str, Box<dyn std::error::Error>> {
     match config.media.url_downloader.as_deref() {
         Some("yt-dlp") => Ok("yt-dlp"),
-        Some(other) => Err(format!("Unsupported media.url_downloader: {}", other).into()),
+        Some(other) => Err(format!(
+            "Unsupported media.url_downloader: {}. Only \"yt-dlp\" is supported for URL input.",
+            other
+        )
+        .into()),
         None => Err(
-            "URL input is disabled. Set media.url_downloader = \"yt-dlp\" in config to enable it."
+            "URL input is disabled. Set media.url_downloader = \"yt-dlp\" in config to enable yt-dlp-backed URL downloads."
                 .into(),
         ),
     }
@@ -381,13 +385,17 @@ fn download_video(
             if can_fallback_to_direct_http(url)? {
                 download_video_direct_http(url, out_dir).map_err(|direct_error| {
                     format!(
-                        "yt-dlp failed ({}) and direct-http fallback failed ({})",
+                        "yt-dlp failed ({}) and direct-http fallback failed ({}). Only yt-dlp-resolvable URLs and direct video file links are supported.",
                         ytdlp_error, direct_error
                     )
                     .into()
                 })
             } else {
-                Err(ytdlp_error)
+                Err(format!(
+                    "{}. Only yt-dlp-resolvable URLs and direct video file links are supported.",
+                    ytdlp_error
+                )
+                .into())
             }
         }
     }
@@ -489,13 +497,17 @@ fn estimate_url_size_mb(downloader: &str, url: &Url) -> Result<f64, Box<dyn std:
             if can_fallback_to_direct_http(url)? {
                 estimate_direct_http_size_mb(url).map_err(|direct_error| {
                     format!(
-                        "yt-dlp metadata fetch failed ({}) and direct-http fallback failed ({})",
+                        "yt-dlp metadata fetch failed ({}) and direct-http fallback failed ({}). Only yt-dlp-resolvable URLs and direct video file links are supported.",
                         ytdlp_error, direct_error
                     )
                     .into()
                 })
             } else {
-                Err(ytdlp_error)
+                Err(format!(
+                    "{}. Only yt-dlp-resolvable URLs and direct video file links are supported.",
+                    ytdlp_error
+                )
+                .into())
             }
         }
     }
@@ -758,6 +770,10 @@ mod tests {
         let config = Config::default();
         let result = configured_url_downloader(&config);
         assert!(result.is_err());
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            "URL input is disabled. Set media.url_downloader = \"yt-dlp\" in config to enable yt-dlp-backed URL downloads."
+        );
     }
 
     #[test]
@@ -765,5 +781,18 @@ mod tests {
         let mut config = Config::default();
         config.media.url_downloader = Some("yt-dlp".to_string());
         assert_eq!(configured_url_downloader(&config).unwrap(), "yt-dlp");
+    }
+
+    #[test]
+    fn test_configured_url_downloader_rejects_unsupported_tool() {
+        let mut config = Config::default();
+        config.media.url_downloader = Some("curl".to_string());
+
+        let result = configured_url_downloader(&config);
+
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            "Unsupported media.url_downloader: curl. Only \"yt-dlp\" is supported for URL input."
+        );
     }
 }

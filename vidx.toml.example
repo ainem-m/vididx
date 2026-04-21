@@ -7,7 +7,8 @@ parallelism = 4
 ffmpeg_path = "ffmpeg"
 ffprobe_path = "ffprobe"
 audio_sample_rate = 16000
-# URL input is disabled by default. Enable it explicitly when yt-dlp is installed.
+# URL input is disabled by default. Enable it explicitly only if yt-dlp is installed.
+# This only supports yt-dlp-resolvable URLs and simple direct video file links.
 url_downloader = "yt-dlp"
 
 [segment.coarse]
