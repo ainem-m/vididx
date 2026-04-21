@@ -1,11 +1,11 @@
 //! vidx-segment
 
-mod coarse;
-mod semantic;
-mod normalize;
 mod annotate;
+mod coarse;
+mod normalize;
+mod semantic;
 
-pub use coarse::coarse_segment;
-pub use semantic::semantic_chunk;
-pub use normalize::normalize;
 pub use annotate::annotate_chunk;
+pub use coarse::coarse_segment;
+pub use normalize::normalize;
+pub use semantic::semantic_chunk;

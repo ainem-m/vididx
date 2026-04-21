@@ -54,10 +54,7 @@ fn parse_scene_output(output: &str) -> Result<Vec<SceneChange>, VidxError> {
             }
         } else if let Some(caps) = pts_time_regex.captures(line) {
             if let Ok(at_sec) = caps[1].parse::<f64>() {
-                changes.push(SceneChange {
-                    at_sec,
-                    score: 0.0,
-                });
+                changes.push(SceneChange { at_sec, score: 0.0 });
             }
         }
     }

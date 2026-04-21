@@ -2774,9 +2774,11 @@ dependencies = [
  "tokio",
  "vidx-asr",
  "vidx-core",
+ "vidx-llm",
  "vidx-media",
  "vidx-output",
  "vidx-segment",
+ "vidx-vision",
 ]
 
 [[package]]

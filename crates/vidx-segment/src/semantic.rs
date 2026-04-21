@@ -69,8 +69,7 @@ fn render_semantic_prompt(
     target_min: f64,
     target_max: f64,
 ) -> Result<String, VidxError> {
-    let template_path = std::env::var("CARGO_MANIFEST_DIR")
-        .unwrap_or_else(|_| ".".to_string());
+    let template_path = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".to_string());
 
     // Try to find the template from workspace root
     let template_file = format!("{}/../../prompts/semantic_chunking.jinja", template_path);
@@ -83,9 +82,8 @@ fn render_semantic_prompt(
         include_str!("../../../prompts/semantic_chunking.jinja").to_string()
     };
 
-    let mut tera = Tera::new("").map_err(|e| {
-        VidxError::Segment(format!("Failed to create template engine: {}", e))
-    })?;
+    let mut tera = Tera::new("")
+        .map_err(|e| VidxError::Segment(format!("Failed to create template engine: {}", e)))?;
 
     tera.add_raw_template("semantic_chunking", &template_content)
         .map_err(|e| VidxError::Segment(format!("Failed to add template: {}", e)))?;
@@ -135,24 +133,18 @@ fn parse_and_validate_chunks(
         let next = &chunk_response.chunks[i + 1];
 
         if current.end_sec > next.start_sec {
-            return Err(VidxError::Segment(
-                "Chunks must not overlap".to_string(),
-            ));
+            return Err(VidxError::Segment("Chunks must not overlap".to_string()));
         }
 
         if (current.end_sec - next.start_sec).abs() > 0.01 {
-            return Err(VidxError::Segment(
-                "Chunks must be continuous".to_string(),
-            ));
+            return Err(VidxError::Segment("Chunks must be continuous".to_string()));
         }
     }
 
     // Check all chunks have positive duration
     for chunk in &chunk_response.chunks {
         if chunk.end_sec <= chunk.start_sec {
-            return Err(VidxError::Segment(
-                "Chunk end must be > start".to_string(),
-            ));
+            return Err(VidxError::Segment("Chunk end must be > start".to_string()));
         }
     }
 
@@ -171,17 +163,10 @@ fn parse_and_validate_chunks(
 }
 
 fn extract_transcript_segment(start_sec: f64, end_sec: f64) -> String {
-    format!(
-        "Segment from {:.1}s to {:.1}s",
-        start_sec, end_sec
-    )
+    format!("Segment from {:.1}s to {:.1}s", start_sec, end_sec)
 }
 
-fn equal_division(
-    coarse: &CoarseSegment,
-    target_min: f64,
-    target_max: f64,
-) -> Vec<SemanticChunk> {
+fn equal_division(coarse: &CoarseSegment, target_min: f64, target_max: f64) -> Vec<SemanticChunk> {
     let duration = coarse.end_sec - coarse.start_sec;
     let num_chunks = (duration / ((target_min + target_max) / 2.0).max(1.0)).ceil() as usize;
     let num_chunks = num_chunks.max(1);

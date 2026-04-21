@@ -1,10 +1,10 @@
 use clap::{Parser, Subcommand};
-use std::path::PathBuf;
-use vidx_core::{VidxError, Config};
-use vidx_pipeline::{JobContext, Manifest, run_pipeline};
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use std::fs;
+use vidx_core::{Config, VidxError};
+use vidx_pipeline::{JobContext, Manifest, run_pipeline};
 
 #[derive(Parser)]
 #[command(
@@ -121,13 +121,21 @@ async fn process_command(
     let manifest_path = out_dir.join("manifest.json");
     let source_hash = vidx_core::hash::sha256_file(&video)?;
     let config = Config::load(None)?;
-    let config_hash = format!("sha256:{}", serde_json::to_string(&config).unwrap_or_default());
+    let config_hash = format!(
+        "sha256:{}",
+        serde_json::to_string(&config).unwrap_or_default()
+    );
 
     let manifest = if manifest_path.exists() && !force {
         Manifest::load(&manifest_path)
             .map_err(|e| VidxError::Config(format!("Failed to load manifest: {:?}", e)))?
     } else {
-        Manifest::new(&vid_id, video.to_string_lossy().as_ref(), &source_hash, &config_hash)
+        Manifest::new(
+            &vid_id,
+            video.to_string_lossy().as_ref(),
+            &source_hash,
+            &config_hash,
+        )
     };
 
     // Create job context
@@ -163,9 +171,7 @@ async fn inspect_command(out_dir: PathBuf) -> Result<(), Box<dyn std::error::Err
     for (stage_name, record) in &manifest.stages {
         println!(
             "  {} - {:?} ({})",
-            stage_name,
-            record.status,
-            record.input_hash
+            stage_name, record.status, record.input_hash
         );
     }
 
@@ -226,14 +232,14 @@ async fn estimate_command(video: PathBuf) -> Result<(), Box<dyn std::error::Erro
     Ok(())
 }
 
-fn check_video_exists(path: &PathBuf) -> Result<(), Box<dyn std::error::Error>> {
+fn check_video_exists(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
     if !path.exists() {
         return Err(format!("Video file not found: {}", path.display()).into());
     }
     Ok(())
 }
 
-fn check_file_exists(path: &PathBuf) -> Result<(), Box<dyn std::error::Error>> {
+fn check_file_exists(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
     if !path.exists() {
         return Err(format!("File not found: {}", path.display()).into());
     }

@@ -21,21 +21,19 @@ pub async fn annotate_chunk(
         Analyze the provided transcript and generate a concise title, summary, and keywords.";
 
     match llm_client.call_with_json_mode(system_prompt, &prompt).await {
-        Ok(response) => {
-            match parse_annotation_response(&response) {
-                Ok(annotation) => Ok(AnnotatedChunk {
-                    chunk_id: chunk.chunk_id.clone(),
-                    parent_segment_id: chunk.parent_segment_id.clone(),
-                    start_sec: chunk.start_sec,
-                    end_sec: chunk.end_sec,
-                    transcript_text: chunk.transcript_text.clone(),
-                    title: annotation.title,
-                    summary: annotation.summary,
-                    keywords: annotation.keywords,
-                }),
-                Err(_) => Ok(create_fallback_annotation(chunk)),
-            }
-        }
+        Ok(response) => match parse_annotation_response(&response) {
+            Ok(annotation) => Ok(AnnotatedChunk {
+                chunk_id: chunk.chunk_id.clone(),
+                parent_segment_id: chunk.parent_segment_id.clone(),
+                start_sec: chunk.start_sec,
+                end_sec: chunk.end_sec,
+                transcript_text: chunk.transcript_text.clone(),
+                title: annotation.title,
+                summary: annotation.summary,
+                keywords: annotation.keywords,
+            }),
+            Err(_) => Ok(create_fallback_annotation(chunk)),
+        },
         Err(_) => Ok(create_fallback_annotation(chunk)),
     }
 }
@@ -43,9 +41,8 @@ pub async fn annotate_chunk(
 fn render_annotation_prompt(chunk: &NormalizedChunk) -> Result<String, VidxError> {
     let template_content = include_str!("../../../prompts/annotate_chunk.jinja");
 
-    let mut tera = Tera::new("").map_err(|e| {
-        VidxError::Segment(format!("Failed to create template engine: {}", e))
-    })?;
+    let mut tera = Tera::new("")
+        .map_err(|e| VidxError::Segment(format!("Failed to create template engine: {}", e)))?;
 
     tera.add_raw_template("annotate", template_content)
         .map_err(|e| VidxError::Segment(format!("Failed to add template: {}", e)))?;
@@ -58,7 +55,9 @@ fn render_annotation_prompt(chunk: &NormalizedChunk) -> Result<String, VidxError
         .map_err(|e| VidxError::Segment(format!("Failed to render template: {}", e)))
 }
 
-fn parse_annotation_response(response: &serde_json::Value) -> Result<AnnotationResponse, VidxError> {
+fn parse_annotation_response(
+    response: &serde_json::Value,
+) -> Result<AnnotationResponse, VidxError> {
     serde_json::from_value(response.clone())
         .map_err(|e| VidxError::Segment(format!("Failed to parse annotation: {}", e)))
 }
@@ -142,8 +141,10 @@ mod tests {
             parent_segment_id: "seg".to_string(),
             start_sec: 0.0,
             end_sec: 50.0,
-            transcript_text: "This is a very long transcript that should be truncated when used as a title \
-                              because it exceeds the maximum title length of fifty characters.".to_string(),
+            transcript_text:
+                "This is a very long transcript that should be truncated when used as a title \
+                              because it exceeds the maximum title length of fifty characters."
+                    .to_string(),
         };
 
         let result = create_fallback_annotation(&chunk);

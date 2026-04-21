@@ -34,7 +34,10 @@ impl AnthropicClient {
         user_message: &str,
     ) -> Result<serde_json::Value, VidxError> {
         // Acquire concurrency permit
-        let _permit = self.semaphore.acquire().await
+        let _permit = self
+            .semaphore
+            .acquire()
+            .await
             .map_err(|_| VidxError::Llm("Failed to acquire semaphore".to_string()))?;
 
         // Retry loop with exponential backoff (max 3 attempts)
@@ -92,10 +95,7 @@ impl AnthropicClient {
         if !response.status().is_success() {
             let status = response.status();
             let body = response.text().await.unwrap_or_default();
-            return Err(VidxError::Llm(format!(
-                "API error ({}): {}",
-                status, body
-            )));
+            return Err(VidxError::Llm(format!("API error ({}): {}", status, body)));
         }
 
         let body = response

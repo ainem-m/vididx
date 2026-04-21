@@ -39,10 +39,8 @@ fn merge_short_chunks(chunks: Vec<SemanticChunk>, hard_min: f64) -> Vec<Semantic
             // Merge with next chunk
             let next = &chunks[i + 1];
             current.end_sec = next.end_sec;
-            current.transcript_text = format!(
-                "{} {}",
-                current.transcript_text, next.transcript_text
-            );
+            current.transcript_text =
+                format!("{} {}", current.transcript_text, next.transcript_text);
             current.rationale = format!("{} + {}", current.rationale, next.rationale);
             i += 1;
         }
@@ -50,12 +48,10 @@ fn merge_short_chunks(chunks: Vec<SemanticChunk>, hard_min: f64) -> Vec<Semantic
         if current.end_sec - current.start_sec < threshold && !result.is_empty() {
             let previous = result.last_mut().expect("checked is_empty");
             previous.end_sec = current.end_sec;
-            previous.transcript_text = format!(
-                "{} {}",
-                previous.transcript_text, current.transcript_text
-            )
-            .trim()
-            .to_string();
+            previous.transcript_text =
+                format!("{} {}", previous.transcript_text, current.transcript_text)
+                    .trim()
+                    .to_string();
             previous.rationale = format!("{} + {}", previous.rationale, current.rationale);
         } else {
             result.push(current);
@@ -108,7 +104,7 @@ fn assign_chunk_ids(chunks: Vec<SemanticChunk>, video_id: &str) -> Vec<Normalize
         .into_iter()
         .enumerate()
         .map(|(idx, chunk)| NormalizedChunk {
-            chunk_id: format!("{}_{:04}", format!("{}_chunk", video_id), idx),
+            chunk_id: format!("{video_id}_chunk_{idx:04}"),
             parent_segment_id: String::new(),
             start_sec: chunk.start_sec,
             end_sec: chunk.end_sec,

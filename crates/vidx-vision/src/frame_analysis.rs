@@ -1,5 +1,5 @@
-use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 use vidx_core::{SceneChange, VidxError};
 
 use crate::dhash::dhash_from_path;
@@ -46,9 +46,9 @@ pub async fn analyze_frames(
     let mut seen_hashes = Vec::new();
 
     for (ts, hash, path) in frames_with_hashes {
-        let is_duplicate = seen_hashes.iter().any(|&h| {
-            hamming_distance(hash, h) <= DHASH_DISTANCE_THRESHOLD
-        });
+        let is_duplicate = seen_hashes
+            .iter()
+            .any(|&h| hamming_distance(hash, h) <= DHASH_DISTANCE_THRESHOLD);
 
         if !is_duplicate {
             seen_hashes.push(hash);
@@ -100,8 +100,14 @@ mod tests {
     #[test]
     fn test_generate_timestamps_with_scene_changes() {
         let scene_changes = vec![
-            SceneChange { at_sec: 7.5, score: 0.8 },
-            SceneChange { at_sec: 12.5, score: 0.9 },
+            SceneChange {
+                at_sec: 7.5,
+                score: 0.8,
+            },
+            SceneChange {
+                at_sec: 12.5,
+                score: 0.9,
+            },
         ];
 
         let timestamps = generate_timestamps(20.0, &scene_changes);

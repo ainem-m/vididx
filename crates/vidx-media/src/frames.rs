@@ -108,7 +108,7 @@ mod tests {
     fn test_quality_conversion() {
         // Quality 85 should map to a reasonable ffmpeg quality value
         let q = (32 - 85 / 4).clamp(1, 31);
-        assert!(q >= 1 && q <= 31);
+        assert!((1..=31).contains(&q));
     }
 
     #[tokio::test]

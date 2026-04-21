@@ -129,11 +129,7 @@ fn find_snap_point(
 }
 
 /// Collect transcript segments within time range.
-fn collect_transcript(
-    timeline: &TranscriptTimeline,
-    start_sec: f64,
-    end_sec: f64,
-) -> String {
+fn collect_transcript(timeline: &TranscriptTimeline, start_sec: f64, end_sec: f64) -> String {
     timeline
         .segments
         .iter()
@@ -149,9 +145,7 @@ mod tests {
 
     #[test]
     fn test_coarse_segment_basic() {
-        let transcript = TranscriptTimeline {
-            segments: vec![],
-        };
+        let transcript = TranscriptTimeline { segments: vec![] };
 
         let result = coarse_segment(
             100.0,
@@ -173,9 +167,7 @@ mod tests {
 
     #[test]
     fn test_coarse_segment_with_snap() {
-        let transcript = TranscriptTimeline {
-            segments: vec![],
-        };
+        let transcript = TranscriptTimeline { segments: vec![] };
         let silence = vec![SilenceInterval {
             start_sec: 45.0,
             end_sec: 55.0,
@@ -198,18 +190,9 @@ mod tests {
 
     #[test]
     fn test_coarse_segment_continuity() {
-        let transcript = TranscriptTimeline {
-            segments: vec![],
-        };
+        let transcript = TranscriptTimeline { segments: vec![] };
 
-        let result = coarse_segment(
-            300.0,
-            &transcript,
-            &[],
-            &[],
-            100.0,
-            10.0,
-        );
+        let result = coarse_segment(300.0, &transcript, &[], &[], 100.0, 10.0);
 
         assert!(result.is_ok());
         let segs = result.unwrap();
@@ -220,9 +203,7 @@ mod tests {
 
     #[test]
     fn test_coarse_segment_zero_duration() {
-        let transcript = TranscriptTimeline {
-            segments: vec![],
-        };
+        let transcript = TranscriptTimeline { segments: vec![] };
 
         let result = coarse_segment(0.0, &transcript, &[], &[], 100.0, 10.0);
         assert!(result.is_err());

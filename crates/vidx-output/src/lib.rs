@@ -2,4 +2,4 @@
 
 mod output;
 
-pub use output::{write_chunks_jsonl, write_markdown, write_index, OutputIndex};
+pub use output::{OutputIndex, write_chunks_jsonl, write_index, write_markdown};

@@ -1,6 +1,7 @@
 use chrono::Utc;
 use serde::Serialize;
 use std::cmp::Ordering;
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use crate::stage::JobContext;
@@ -9,9 +10,14 @@ use vidx_core::{
     AnnotatedChunk, Chunk, ContentType, FrameKind, ImageRef, ModalityFlags, NormalizedChunk,
     ProcessingMeta, SceneChange, SemanticChunk, SourceJumpRef, TranscriptTimeline, VidxError,
 };
+use vidx_llm::AnthropicClient;
 use vidx_media::{detect_scene_changes, detect_silence, extract_audio, extract_frames, probe};
-use vidx_output::{write_index, write_markdown, OutputIndex};
-use vidx_segment::{coarse_segment, normalize};
+use vidx_output::{OutputIndex, write_index, write_markdown};
+use vidx_segment::{annotate_chunk, coarse_segment, normalize};
+use vidx_vision::{
+    ClaudeVlmAdapter, OcrAdapter, TesseractAdapter, VlmCaptionAdapter, dhash_from_path,
+    hamming_distance,
+};
 
 const STAGES: &[&str] = &[
     "stage0_probe",
@@ -31,6 +37,17 @@ struct FrameArtifact {
     path: String,
     at_sec: f64,
     kind: FrameKind,
+    analyzed: bool,
+    ocr_text: Option<String>,
+    visual_caption: Option<String>,
+}
+
+#[derive(Debug)]
+struct FrameCandidate {
+    path: String,
+    at_sec: f64,
+    kind: FrameKind,
+    dhash: Option<u64>,
 }
 
 /// Run a pipeline for processing a video.
@@ -111,17 +128,26 @@ pub async fn run_pipeline(ctx: JobContext) -> Result<(), VidxError> {
                 ctx.config.frames.max_analyzed_per_chunk.max(8),
             );
             let out_dir = ctx.out_dir.join("images").join(&ctx.video_id);
-            let paths =
-                extract_frames(&ctx.config.media.ffmpeg_path, &ctx.source_path, &stamps, &out_dir, 85)
-                    .await?;
-            paths.into_iter()
+            let paths = extract_frames(
+                &ctx.config.media.ffmpeg_path,
+                &ctx.source_path,
+                &stamps,
+                &out_dir,
+                85,
+            )
+            .await?;
+            let candidates = paths
+                .into_iter()
                 .zip(stamps.into_iter())
-                .map(|(path, at_sec)| FrameArtifact {
+                .map(|(path, at_sec)| FrameCandidate {
                     path: path.to_string_lossy().to_string(),
                     at_sec,
                     kind: nearest_frame_kind(at_sec, &scenes),
+                    dhash: dhash_from_path(&path).ok(),
                 })
-                .collect::<Vec<_>>()
+                .collect::<Vec<_>>();
+
+            dedupe_frame_candidates(candidates, ctx.config.frames.dhash_distance_threshold)
         } else {
             Vec::new()
         };
@@ -145,13 +171,15 @@ pub async fn run_pipeline(ctx: JobContext) -> Result<(), VidxError> {
     let semantic = run_stage(&ctx, STAGES[7], &input_hash, async {
         let semantic = coarse
             .iter()
-            .flat_map(|segment| heuristic_semantic_chunks(
-                segment.start_sec,
-                segment.end_sec,
-                &segment.transcript_text,
-                ctx.config.segment.semantic.target_min_sec,
-                ctx.config.segment.semantic.target_max_sec,
-            ))
+            .flat_map(|segment| {
+                heuristic_semantic_chunks(
+                    segment.start_sec,
+                    segment.end_sec,
+                    &transcript,
+                    ctx.config.segment.semantic.target_min_sec,
+                    ctx.config.segment.semantic.target_max_sec,
+                )
+            })
             .collect::<Vec<_>>();
         Ok((ctx.out_dir.join("stage7_semantic.json"), semantic))
     })
@@ -168,11 +196,20 @@ pub async fn run_pipeline(ctx: JobContext) -> Result<(), VidxError> {
     })
     .await?;
 
+    let frame_artifacts = enrich_frame_artifacts(&ctx, frame_artifacts, &normalized).await;
+
     let annotated = run_stage(&ctx, STAGES[9], &input_hash, async {
-        let annotated = normalized
-            .iter()
-            .map(fallback_annotate)
-            .collect::<Vec<_>>();
+        let llm_client = anthropic_client_from_env(&ctx);
+        let mut annotated = Vec::with_capacity(normalized.len());
+        for chunk in &normalized {
+            let item = match llm_client.as_ref() {
+                Some(client) => annotate_chunk(client, chunk)
+                    .await
+                    .unwrap_or_else(|_| fallback_annotate(chunk)),
+                None => fallback_annotate(chunk),
+            };
+            annotated.push(item);
+        }
         Ok((ctx.out_dir.join("stage9_annotate.json"), annotated))
     })
     .await?;
@@ -190,7 +227,10 @@ pub async fn run_pipeline(ctx: JobContext) -> Result<(), VidxError> {
         &frame_artifacts,
         media_probe.has_audio,
     );
-    write_chunks_jsonl(&chunks, &ctx.out_dir.join(format!("{}.chunks.jsonl", ctx.video_id)))?;
+    write_chunks_jsonl(
+        &chunks,
+        &ctx.out_dir.join(format!("{}.chunks.jsonl", ctx.video_id)),
+    )?;
 
     write_markdown(
         &annotated,
@@ -218,7 +258,12 @@ pub async fn run_pipeline(ctx: JobContext) -> Result<(), VidxError> {
     Ok(())
 }
 
-async fn run_stage<T, F>(ctx: &JobContext, stage_name: &'static str, input_hash: &str, f: F) -> Result<T, VidxError>
+async fn run_stage<T, F>(
+    ctx: &JobContext,
+    stage_name: &'static str,
+    input_hash: &str,
+    f: F,
+) -> Result<T, VidxError>
 where
     T: Serialize,
     F: std::future::Future<Output = Result<(PathBuf, T), VidxError>>,
@@ -333,7 +378,10 @@ fn select_frame_timestamps(
 }
 
 fn nearest_frame_kind(at_sec: f64, scenes: &[SceneChange]) -> FrameKind {
-    if scenes.iter().any(|scene| (scene.at_sec - at_sec).abs() < 0.25) {
+    if scenes
+        .iter()
+        .any(|scene| (scene.at_sec - at_sec).abs() < 0.25)
+    {
         FrameKind::SceneChange
     } else {
         FrameKind::Periodic
@@ -343,7 +391,7 @@ fn nearest_frame_kind(at_sec: f64, scenes: &[SceneChange]) -> FrameKind {
 fn heuristic_semantic_chunks(
     start_sec: f64,
     end_sec: f64,
-    transcript_text: &str,
+    transcript: &TranscriptTimeline,
     target_min_sec: f64,
     target_max_sec: f64,
 ) -> Vec<SemanticChunk> {
@@ -368,8 +416,8 @@ fn heuristic_semantic_chunks(
             SemanticChunk {
                 start_sec: chunk_start,
                 end_sec: chunk_end,
-                transcript_text: transcript_text.to_string(),
-                rationale: if transcript_text.trim().is_empty() {
+                transcript_text: transcript_text_for_range(transcript, chunk_start, chunk_end),
+                rationale: if transcript.segments.is_empty() {
                     "time-based split without transcript".to_string()
                 } else {
                     "time-based split within coarse segment".to_string()
@@ -377,6 +425,21 @@ fn heuristic_semantic_chunks(
             }
         })
         .collect()
+}
+
+fn transcript_text_for_range(
+    transcript: &TranscriptTimeline,
+    start_sec: f64,
+    end_sec: f64,
+) -> String {
+    transcript
+        .segments
+        .iter()
+        .filter(|segment| segment.end_sec > start_sec && segment.start_sec < end_sec)
+        .map(|segment| segment.text.trim())
+        .filter(|text| !text.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn fallback_annotate(chunk: &NormalizedChunk) -> AnnotatedChunk {
@@ -388,7 +451,11 @@ fn fallback_annotate(chunk: &NormalizedChunk) -> AnnotatedChunk {
             format_time_range(chunk.start_sec, chunk.end_sec)
         )
     } else {
-        let mut words = transcript.split_whitespace().take(8).collect::<Vec<_>>().join(" ");
+        let mut words = transcript
+            .split_whitespace()
+            .take(8)
+            .collect::<Vec<_>>()
+            .join(" ");
         if words.len() > 60 {
             words.truncate(60);
         }
@@ -441,7 +508,12 @@ fn extract_keywords(transcript: &str, title: &str) -> Vec<String> {
                 None
             }
         })
-        .filter(|word| !matches!(word.as_str(), "this" | "that" | "with" | "from" | "chunk" | "segment"))
+        .filter(|word| {
+            !matches!(
+                word.as_str(),
+                "this" | "that" | "with" | "from" | "chunk" | "segment"
+            )
+        })
         .collect::<Vec<_>>();
 
     keywords.sort();
@@ -473,11 +545,21 @@ fn build_chunks(
                     path: frame.path.clone(),
                     at_sec: frame.at_sec,
                     kind: frame.kind.clone(),
-                    analyzed: false,
+                    analyzed: frame.analyzed,
                 })
                 .collect::<Vec<_>>();
 
-            let embedding_text = build_embedding_text(&chunk.title, &chunk.summary, &chunk.transcript_text);
+            let (ocr_text, visual_caption) =
+                collect_chunk_visual_data(chunk.start_sec, chunk.end_sec, frame_artifacts);
+            let has_ocr = ocr_text.is_some();
+            let has_visual = !image_refs.is_empty();
+            let embedding_text = build_embedding_text(
+                &chunk.title,
+                &chunk.summary,
+                &chunk.transcript_text,
+                ocr_text.as_deref(),
+                visual_caption.as_deref(),
+            );
 
             Chunk {
                 schema_version: "1.0".to_string(),
@@ -497,8 +579,8 @@ fn build_chunks(
                 title: chunk.title.clone(),
                 summary: chunk.summary.clone(),
                 transcript: chunk.transcript_text.clone(),
-                ocr_text: None,
-                visual_caption: None,
+                ocr_text,
+                visual_caption,
                 keywords: chunk.keywords.clone(),
                 embedding_text,
                 image_refs,
@@ -508,11 +590,13 @@ fn build_chunks(
                 },
                 modality_flags: ModalityFlags {
                     has_speech: has_audio && !chunk.transcript_text.trim().is_empty(),
-                    has_ocr: false,
-                    has_visual: true,
+                    has_ocr,
+                    has_visual,
                 },
                 processing_meta: ProcessingMeta {
-                    segmentation_rationale: Some("coarse+time-based semantic segmentation".to_string()),
+                    segmentation_rationale: Some(
+                        "coarse+time-based semantic segmentation".to_string(),
+                    ),
                     asr_adapter: ctx.config.asr.adapter.clone(),
                     vlm_adapter: ctx.config.vision.caption.adapter.clone(),
                     generated_at: Utc::now(),
@@ -522,16 +606,220 @@ fn build_chunks(
         .collect()
 }
 
-fn build_embedding_text(title: &str, summary: &str, transcript: &str) -> String {
-    [title.trim(), summary.trim(), transcript.trim()]
-        .into_iter()
-        .filter(|part| !part.is_empty())
-        .collect::<Vec<_>>()
-        .join("\n\n")
+fn build_embedding_text(
+    title: &str,
+    summary: &str,
+    transcript: &str,
+    ocr_text: Option<&str>,
+    visual_caption: Option<&str>,
+) -> String {
+    [
+        Some(title.trim()),
+        Some(summary.trim()),
+        Some(transcript.trim()),
+        ocr_text.map(str::trim),
+        visual_caption.map(str::trim),
+    ]
+    .into_iter()
+    .flatten()
+    .filter(|part| !part.is_empty())
+    .collect::<Vec<_>>()
+    .join("\n\n")
+}
+
+fn collect_chunk_visual_data(
+    start_sec: f64,
+    end_sec: f64,
+    frame_artifacts: &[FrameArtifact],
+) -> (Option<String>, Option<String>) {
+    let mut ocr_parts = Vec::new();
+    let mut caption_parts = Vec::new();
+    let mut seen_ocr = HashSet::new();
+    let mut seen_caption = HashSet::new();
+
+    for frame in frame_artifacts
+        .iter()
+        .filter(|frame| frame.at_sec >= start_sec && frame.at_sec <= end_sec)
+    {
+        if let Some(text) = frame.ocr_text.as_deref() {
+            let normalized = text.trim();
+            if !normalized.is_empty() && seen_ocr.insert(normalized.to_string()) {
+                ocr_parts.push(normalized.to_string());
+            }
+        }
+
+        if let Some(text) = frame.visual_caption.as_deref() {
+            let normalized = text.trim();
+            if !normalized.is_empty() && seen_caption.insert(normalized.to_string()) {
+                caption_parts.push(normalized.to_string());
+            }
+        }
+    }
+
+    let ocr_text = (!ocr_parts.is_empty()).then(|| ocr_parts.join("\n"));
+    let visual_caption = (!caption_parts.is_empty()).then(|| caption_parts.join(" "));
+    (ocr_text, visual_caption)
+}
+
+fn dedupe_frame_candidates(
+    candidates: Vec<FrameCandidate>,
+    distance_threshold: usize,
+) -> Vec<FrameArtifact> {
+    let mut selected_hashes = Vec::new();
+    let mut selected = Vec::new();
+
+    for candidate in candidates {
+        let is_duplicate = candidate.dhash.is_some_and(|hash| {
+            selected_hashes
+                .iter()
+                .any(|seen| hamming_distance(hash, *seen) <= distance_threshold)
+        });
+
+        if is_duplicate {
+            continue;
+        }
+
+        if let Some(hash) = candidate.dhash {
+            selected_hashes.push(hash);
+        }
+
+        selected.push(FrameArtifact {
+            path: candidate.path,
+            at_sec: candidate.at_sec,
+            kind: candidate.kind,
+            analyzed: true,
+            ocr_text: None,
+            visual_caption: None,
+        });
+    }
+
+    selected
+}
+
+async fn enrich_frame_artifacts(
+    ctx: &JobContext,
+    mut frames: Vec<FrameArtifact>,
+    chunks: &[NormalizedChunk],
+) -> Vec<FrameArtifact> {
+    if frames.is_empty() {
+        return frames;
+    }
+
+    let ocr_adapter = TesseractAdapter::new(ocr_binary_path(ctx));
+    let ocr_languages = ctx
+        .config
+        .vision
+        .ocr
+        .languages
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+
+    for frame in &mut frames {
+        frame.ocr_text = ocr_adapter
+            .extract_text(Path::new(&frame.path), &ocr_languages)
+            .await
+            .ok()
+            .and_then(|text| {
+                let trimmed = text.trim();
+                (!trimmed.is_empty()).then(|| trimmed.to_string())
+            });
+    }
+
+    if let Some(vlm_adapter) = claude_vlm_from_env(ctx) {
+        let selected =
+            select_caption_frame_indices(&frames, chunks, ctx.config.vision.caption.max_per_chunk);
+        for index in selected {
+            if let Some(frame) = frames.get_mut(index) {
+                frame.visual_caption = vlm_adapter
+                    .caption(Path::new(&frame.path))
+                    .await
+                    .ok()
+                    .and_then(|text| {
+                        let trimmed = text.trim();
+                        (!trimmed.is_empty()).then(|| trimmed.to_string())
+                    });
+            }
+        }
+    }
+
+    frames
+}
+
+fn ocr_binary_path(ctx: &JobContext) -> &str {
+    &ctx.config.vision.ocr.adapter
+}
+
+fn select_caption_frame_indices(
+    frames: &[FrameArtifact],
+    chunks: &[NormalizedChunk],
+    max_per_chunk: usize,
+) -> Vec<usize> {
+    if max_per_chunk == 0 {
+        return Vec::new();
+    }
+
+    let mut selected = Vec::new();
+
+    for chunk in chunks {
+        let mut indices = frames
+            .iter()
+            .enumerate()
+            .filter(|(_, frame)| frame.at_sec >= chunk.start_sec && frame.at_sec <= chunk.end_sec)
+            .map(|(index, _)| index)
+            .collect::<Vec<_>>();
+
+        indices.sort_by(|left, right| {
+            let left_frame = &frames[*left];
+            let right_frame = &frames[*right];
+            match (
+                left_frame.kind == FrameKind::SceneChange,
+                right_frame.kind == FrameKind::SceneChange,
+            ) {
+                (true, false) => Ordering::Less,
+                (false, true) => Ordering::Greater,
+                _ => left_frame
+                    .at_sec
+                    .partial_cmp(&right_frame.at_sec)
+                    .unwrap_or(Ordering::Equal),
+            }
+        });
+
+        selected.extend(indices.into_iter().take(max_per_chunk));
+    }
+
+    selected.sort_unstable();
+    selected.dedup();
+    selected
+}
+
+fn anthropic_client_from_env(ctx: &JobContext) -> Option<AnthropicClient> {
+    std::env::var("ANTHROPIC_API_KEY").ok().and_then(|api_key| {
+        let trimmed = api_key.trim();
+        (!trimmed.is_empty()).then(|| {
+            AnthropicClient::new(
+                trimmed,
+                &ctx.config.llm.model,
+                ctx.config.llm.max_concurrency,
+            )
+        })
+    })
+}
+
+fn claude_vlm_from_env(ctx: &JobContext) -> Option<ClaudeVlmAdapter> {
+    std::env::var("ANTHROPIC_API_KEY").ok().and_then(|api_key| {
+        let trimmed = api_key.trim();
+        (!trimmed.is_empty())
+            .then(|| ClaudeVlmAdapter::new(trimmed, &ctx.config.vision.caption.model))
+    })
 }
 
 fn format_time_range(start_sec: f64, end_sec: f64) -> String {
-    format!("{}-{}", format_timecode(start_sec), format_timecode(end_sec))
+    format!(
+        "{}-{}",
+        format_timecode(start_sec),
+        format_timecode(end_sec)
+    )
 }
 
 fn format_timecode(seconds: f64) -> String {
@@ -577,12 +865,21 @@ fn stage_error_to_vidx(err: crate::stage::StageError) -> VidxError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Manifest;
+    use vidx_core::Config;
+    use vidx_core::TranscriptSegment;
 
     #[test]
     fn test_select_frame_timestamps_bounds() {
         let scenes = vec![
-            SceneChange { at_sec: 10.0, score: 0.0 },
-            SceneChange { at_sec: 50.0, score: 0.0 },
+            SceneChange {
+                at_sec: 10.0,
+                score: 0.0,
+            },
+            SceneChange {
+                at_sec: 50.0,
+                score: 0.0,
+            },
         ];
         let stamps = select_frame_timestamps(60.0, &scenes, 20.0, 5);
         assert!(!stamps.is_empty());
@@ -592,7 +889,16 @@ mod tests {
 
     #[test]
     fn test_heuristic_semantic_chunks_cover_interval() {
-        let chunks = heuristic_semantic_chunks(0.0, 180.0, "text", 30.0, 90.0);
+        let timeline = TranscriptTimeline {
+            segments: vec![TranscriptSegment {
+                start_sec: 0.0,
+                end_sec: 180.0,
+                text: "text".to_string(),
+                speaker: None,
+                confidence: None,
+            }],
+        };
+        let chunks = heuristic_semantic_chunks(0.0, 180.0, &timeline, 30.0, 90.0);
         assert!(!chunks.is_empty());
         assert_eq!(chunks.first().unwrap().start_sec, 0.0);
         assert_eq!(chunks.last().unwrap().end_sec, 180.0);
@@ -600,7 +906,109 @@ mod tests {
 
     #[test]
     fn test_build_embedding_text_skips_empty_parts() {
-        let text = build_embedding_text("title", "", "body");
+        let text = build_embedding_text("title", "", "body", None, None);
         assert_eq!(text, "title\n\nbody");
+    }
+
+    #[test]
+    fn test_heuristic_semantic_chunks_split_transcript_by_timeline() {
+        let timeline = TranscriptTimeline {
+            segments: vec![
+                TranscriptSegment {
+                    start_sec: 0.0,
+                    end_sec: 10.0,
+                    text: "intro".to_string(),
+                    speaker: None,
+                    confidence: None,
+                },
+                TranscriptSegment {
+                    start_sec: 10.0,
+                    end_sec: 20.0,
+                    text: "details".to_string(),
+                    speaker: None,
+                    confidence: None,
+                },
+            ],
+        };
+
+        let chunks = heuristic_semantic_chunks(0.0, 20.0, &timeline, 10.0, 10.0);
+
+        assert_eq!(chunks.len(), 2);
+        assert_eq!(chunks[0].transcript_text, "intro");
+        assert_eq!(chunks[1].transcript_text, "details");
+    }
+
+    #[test]
+    fn test_build_chunks_includes_visual_analysis() {
+        let config = Config::default();
+        let manifest = Manifest::new("test_video", "/tmp/test.mp4", "sha256:src", "sha256:cfg");
+        let ctx = JobContext {
+            video_id: "test_video".to_string(),
+            source_path: PathBuf::from("/tmp/test.mp4"),
+            out_dir: PathBuf::from("/tmp/out"),
+            config,
+            manifest: std::sync::Arc::new(tokio::sync::Mutex::new(manifest)),
+        };
+        let annotated = vec![AnnotatedChunk {
+            chunk_id: "test_video_chunk_0000".to_string(),
+            parent_segment_id: String::new(),
+            start_sec: 0.0,
+            end_sec: 30.0,
+            transcript_text: "transcript".to_string(),
+            title: "title".to_string(),
+            summary: "summary".to_string(),
+            keywords: vec!["keyword".to_string()],
+        }];
+        let frames = vec![
+            FrameArtifact {
+                path: "frame0.jpg".to_string(),
+                at_sec: 5.0,
+                kind: FrameKind::SceneChange,
+                analyzed: true,
+                ocr_text: Some("Save Project".to_string()),
+                visual_caption: Some("Settings dialog".to_string()),
+            },
+            FrameArtifact {
+                path: "frame1.jpg".to_string(),
+                at_sec: 12.0,
+                kind: FrameKind::Periodic,
+                analyzed: false,
+                ocr_text: None,
+                visual_caption: None,
+            },
+        ];
+
+        let chunks = build_chunks(
+            &ctx,
+            "/tmp/test.mp4",
+            "sha256:src",
+            &annotated,
+            &frames,
+            true,
+        );
+
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].ocr_text.as_deref(), Some("Save Project"));
+        assert_eq!(chunks[0].visual_caption.as_deref(), Some("Settings dialog"));
+        assert!(chunks[0].modality_flags.has_ocr);
+        assert!(chunks[0].image_refs[0].analyzed);
+        assert!(chunks[0].embedding_text.contains("Save Project"));
+        assert!(chunks[0].embedding_text.contains("Settings dialog"));
+    }
+
+    #[test]
+    fn test_ocr_binary_path_uses_configured_adapter() {
+        let mut config = Config::default();
+        config.vision.ocr.adapter = "custom-tesseract".to_string();
+        let manifest = Manifest::new("test_video", "/tmp/test.mp4", "sha256:src", "sha256:cfg");
+        let ctx = JobContext {
+            video_id: "test_video".to_string(),
+            source_path: PathBuf::from("/tmp/test.mp4"),
+            out_dir: PathBuf::from("/tmp/out"),
+            config,
+            manifest: std::sync::Arc::new(tokio::sync::Mutex::new(manifest)),
+        };
+
+        assert_eq!(ocr_binary_path(&ctx), "custom-tesseract");
     }
 }

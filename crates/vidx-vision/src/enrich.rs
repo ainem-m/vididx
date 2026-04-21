@@ -1,9 +1,9 @@
 use std::path::Path;
 use vidx_core::VidxError;
 
+use crate::caption::VlmCaptionAdapter;
 use crate::frame_analysis::ExtractedFrame;
 use crate::ocr::OcrAdapter;
-use crate::caption::VlmCaptionAdapter;
 
 #[derive(Debug, Clone)]
 pub struct EnrichedFrame {

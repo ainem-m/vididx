@@ -30,7 +30,7 @@ pub fn dhash_from_bytes(data: &[u8]) -> Result<u64, VidxError> {
 /// dHash is a 64-bit perceptual hash based on pixel differences.
 pub fn dhash_from_image(img: &DynamicImage) -> u64 {
     // Resize to (DHASH_SIZE+1) x DHASH_SIZE for computing differences
-    let resized = img.resize(
+    let resized = img.resize_exact(
         DHASH_SIZE + 1,
         DHASH_SIZE,
         image::imageops::FilterType::Lanczos3,
@@ -63,6 +63,7 @@ pub fn hamming_distance(hash1: u64, hash2: u64) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use image::{DynamicImage, GrayImage, Luma};
 
     #[test]
     fn test_hamming_distance_same() {
@@ -83,5 +84,14 @@ mod tests {
         let hash2 = 0b1100110000110011u64;
         // XOR: 0b0000000011111111 = 8 bits set
         assert_eq!(hamming_distance(hash1, hash2), 8);
+    }
+
+    #[test]
+    fn test_dhash_from_image_handles_tall_image() {
+        let image = GrayImage::from_fn(2, 32, |x, y| {
+            Luma([((x * 16 + (y % 16)) as u8).saturating_mul(4)])
+        });
+
+        let _ = dhash_from_image(&DynamicImage::ImageLuma8(image));
     }
 }
