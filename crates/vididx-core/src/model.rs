@@ -1,5 +1,3 @@
-#![allow(unreachable_patterns)]
-
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -23,14 +21,12 @@ pub enum FrameKind {
     Periodic,
     #[serde(rename = "scene_change")]
     SceneChange,
-    /// Frame extracted at the start of an ASR utterance (utterance mode).
-    /// Serialized as `periodic` to stay within the SPEC schema.
-    #[serde(rename = "periodic")]
+    #[serde(rename = "utterance_start")]
     UtteranceStart,
 }
 
 /// Flags indicating presence of different modalities in a chunk.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ModalityFlags {
     pub has_speech: bool,
     pub has_ocr: bool,
@@ -279,7 +275,7 @@ mod tests {
     }
 
     #[test]
-    fn test_frame_kind_snake_case() {
+    fn test_frame_kind_serialization() {
         let fk = FrameKind::SceneChange;
         let json = serde_json::to_string(&fk).unwrap();
         assert_eq!(json, "\"scene_change\"");
@@ -287,6 +283,14 @@ mod tests {
         let fk2 = FrameKind::Periodic;
         let json2 = serde_json::to_string(&fk2).unwrap();
         assert_eq!(json2, "\"periodic\"");
+
+        let fk3 = FrameKind::UtteranceStart;
+        let json3 = serde_json::to_string(&fk3).unwrap();
+        assert_eq!(json3, "\"utterance_start\"");
+
+        // UtteranceStart deserializes from "utterance_start", not "periodic"
+        let deserialized: FrameKind = serde_json::from_str("\"utterance_start\"").unwrap();
+        assert_eq!(deserialized, FrameKind::UtteranceStart);
     }
 
     #[test]

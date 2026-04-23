@@ -1,5 +1,6 @@
 /// Core error type for vididx.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum VididxError {
     #[error("media error: {0}")]
     Media(String),
@@ -19,6 +20,23 @@ pub enum VididxError {
     Serde(#[from] serde_json::Error),
     #[error("external tool not found: {0}")]
     ToolNotFound(String),
+}
+
+impl VididxError {
+    /// Returns true if this error is retryable (rate limit, server error, timeout).
+    /// Non-retryable errors include auth failures, bad requests, and config errors.
+    pub fn is_retryable(&self) -> bool {
+        match self {
+            VididxError::Llm(msg) => {
+                msg.contains("429")
+                    || msg.contains("5")
+                    || msg.contains("timeout")
+                    || msg.contains("rate")
+            }
+            VididxError::Io(_) => true,
+            _ => false,
+        }
+    }
 }
 
 #[cfg(test)]

@@ -63,17 +63,28 @@ fn parse_annotation_response(
 }
 
 fn create_fallback_annotation(chunk: &NormalizedChunk) -> AnnotatedChunk {
-    let first_words: Vec<&str> = chunk.transcript_text.split_whitespace().take(10).collect();
-    let default_title = if !first_words.is_empty() {
-        first_words.join(" ")
+    let chars: Vec<char> = chunk.transcript_text.chars().collect();
+    let default_title: String = if chars.len() <= 40 {
+        chars.iter().collect()
     } else {
-        format!("Segment {}", chunk.chunk_id)
+        let mut end = 40;
+        while end > 0
+            && !chars[end].is_whitespace()
+            && !chars.get(end - 1).is_some_and(|c| c.is_whitespace())
+        {
+            end -= 1;
+        }
+        if end == 0 {
+            end = 40;
+        }
+        format!("{}...", chars[..end].iter().collect::<String>())
     };
 
-    let default_title = if default_title.len() > 50 {
-        format!("{}...", &default_title[..47])
+    let default_summary: String = if chars.len() <= 150 {
+        chars.iter().collect()
     } else {
-        default_title
+        let truncated: String = chars[..150].iter().collect();
+        format!("{}...", truncated)
     };
 
     AnnotatedChunk {
@@ -83,7 +94,7 @@ fn create_fallback_annotation(chunk: &NormalizedChunk) -> AnnotatedChunk {
         end_sec: chunk.end_sec,
         transcript_text: chunk.transcript_text.clone(),
         title: default_title,
-        summary: "Failed to generate summary from LLM".to_string(),
+        summary: default_summary,
         keywords: vec!["content".to_string()],
     }
 }
@@ -143,11 +154,11 @@ mod tests {
             end_sec: 50.0,
             transcript_text:
                 "This is a very long transcript that should be truncated when used as a title \
-                              because it exceeds the maximum title length of fifty characters."
+                               because it exceeds the maximum title length of forty characters."
                     .to_string(),
         };
 
         let result = create_fallback_annotation(&chunk);
-        assert!(result.title.len() <= 50);
+        assert!(result.title.chars().count() <= 43); // 40 chars + "..."
     }
 }

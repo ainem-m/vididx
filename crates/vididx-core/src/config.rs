@@ -195,7 +195,7 @@ impl Default for AsrConfig {
         Self {
             adapter: "whisper_cpp".to_string(),
             model: "large-v3".to_string(),
-            language: "auto".to_string(),
+            language: "ja".to_string(),
             whisper_cpp: WhisperCppConfig::default(),
         }
     }

@@ -28,6 +28,8 @@ impl AnthropicClient {
     }
 
     /// Call the Anthropic API with JSON mode.
+    /// Only retries on rate limit (429), server errors (5xx), and timeouts.
+    /// Does not retry client errors (4xx except 429).
     pub async fn call_with_json_mode(
         &self,
         system_prompt: &str,
@@ -50,7 +52,7 @@ impl AnthropicClient {
             match self.call_api_internal(system_prompt, user_message).await {
                 Ok(response) => return Ok(response),
                 Err(e) => {
-                    if attempt >= max_attempts {
+                    if !e.is_retryable() || attempt >= max_attempts {
                         return Err(e);
                     }
                     tokio::time::sleep(delay).await;
@@ -114,9 +116,36 @@ impl AnthropicClient {
             .and_then(|t| t.as_str())
             .ok_or_else(|| VididxError::Llm("No text in response".to_string()))?;
 
-        // Parse JSON from response text
-        serde_json::from_str(text)
+        // Parse JSON from response text, stripping markdown code fences if present
+        let stripped = strip_code_fences(text);
+        serde_json::from_str(&stripped)
             .map_err(|e| VididxError::Llm(format!("Failed to parse JSON from response: {}", e)))
+    }
+}
+
+/// Strip markdown code fences (```json ... ```) from LLM response text.
+fn strip_code_fences(text: &str) -> String {
+    let trimmed = text.trim();
+    if trimmed.starts_with("```") && trimmed.ends_with("```") {
+        let without_fences = trimmed
+            .strip_prefix("```")
+            .unwrap()
+            .strip_suffix("```")
+            .unwrap()
+            .trim();
+        // Remove optional language identifier (e.g., "json\n")
+        if let Some(newline_pos) = without_fences.find('\n') {
+            let maybe_lang = &without_fences[..newline_pos];
+            if maybe_lang.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '-') {
+                without_fences[newline_pos + 1..].to_string()
+            } else {
+                without_fences.to_string()
+            }
+        } else {
+            without_fences.to_string()
+        }
+    } else {
+        trimmed.to_string()
     }
 }
 

@@ -19,6 +19,7 @@ pub async fn detect_silence(
     }
 
     let output = Command::new(ffmpeg_path)
+        .arg("-nostdin")
         .arg("-i")
         .arg(mp4_path)
         .arg("-af")
@@ -41,10 +42,10 @@ fn parse_silence_output(output: &str) -> Result<Vec<SilenceInterval>, VididxErro
     // Pattern: [silencedetect @ ...] silence_start: 0.5
     //          [silencedetect @ ...] silence_end: 2.5 | silence_duration: 2
     let silence_start_regex = Regex::new(r"silence_start:\s+([\d.]+)")
-        .map_err(|e| VididxError::Vision(format!("Regex compilation error: {}", e)))?;
+        .map_err(|e| VididxError::Media(format!("Regex compilation error: {}", e)))?;
 
     let silence_end_regex = Regex::new(r"silence_end:\s+([\d.]+)")
-        .map_err(|e| VididxError::Vision(format!("Regex compilation error: {}", e)))?;
+        .map_err(|e| VididxError::Media(format!("Regex compilation error: {}", e)))?;
 
     let mut current_start: Option<f64> = None;
 

@@ -23,8 +23,9 @@ pub async fn extract_audio(
             .map_err(|e| VididxError::Media(format!("Failed to create output directory: {}", e)))?;
     }
 
-    // Run ffmpeg to extract and resample audio
+    // Run ffmpeg to extract and resample audio (with -nostdin to prevent stdin hang)
     let output = Command::new(ffmpeg_path)
+        .arg("-nostdin")
         .arg("-i")
         .arg(mp4_path)
         .arg("-ac")

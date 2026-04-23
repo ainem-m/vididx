@@ -22,9 +22,9 @@ pub fn coarse_segment(
     while current_start < duration_sec {
         let mut segment_end = (current_start + max_duration).min(duration_sec);
 
-        // Try to snap to auxiliary signals within snap_window
-        let snap_start = current_start;
-        let snap_end = (current_start + max_duration + snap_window).min(duration_sec);
+        // Try to snap to auxiliary signals within snap_window of the ideal boundary
+        let snap_start = (segment_end - snap_window).max(current_start);
+        let snap_end = (segment_end + snap_window).min(duration_sec);
 
         if let Some(new_end) = find_snap_point(
             segment_end,
@@ -187,8 +187,12 @@ mod tests {
 
         assert!(result.is_ok());
         let segs = result.unwrap();
-        // Should snap to 45 or 55
-        assert!(segs[0].end_sec > 45.0 && segs[0].end_sec < 60.0);
+        // Should snap to 45 or 55 (silence boundaries within ±10 of the 50s mark)
+        assert!(
+            (segs[0].end_sec - 45.0).abs() < 0.01 || (segs[0].end_sec - 55.0).abs() < 0.01,
+            "Expected snap to 45 or 55, got {}",
+            segs[0].end_sec
+        );
     }
 
     #[test]

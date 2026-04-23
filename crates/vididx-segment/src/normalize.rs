@@ -1,77 +1,116 @@
 use vididx_core::{NormalizedChunk, SemanticChunk};
 
-const SPLIT_MIN: f64 = 30.0;
-const SPLIT_MAX: f64 = 90.0;
-
 /// Normalize chunks by merging short and splitting long.
+/// Merges shortest-first per SPEC §5 Stage 5.
 pub fn normalize(
     chunks: Vec<SemanticChunk>,
     hard_min: f64,
     hard_max: f64,
+    target_min: f64,
+    target_max: f64,
     video_id: &str,
 ) -> Vec<NormalizedChunk> {
     if chunks.is_empty() {
         return Vec::new();
     }
 
-    // Phase 1: Merge short chunks
+    // Phase 1: Merge short chunks (shortest first per SPEC)
     let merged = merge_short_chunks(chunks, hard_min);
 
     // Phase 2: Split long chunks
-    let split = split_long_chunks(merged, hard_max);
+    let split = split_long_chunks(merged, hard_max, target_min, target_max);
 
     // Phase 3: Assign chunk IDs
     assign_chunk_ids(split, video_id)
 }
 
 fn merge_short_chunks(chunks: Vec<SemanticChunk>, hard_min: f64) -> Vec<SemanticChunk> {
+    if chunks.is_empty() {
+        return Vec::new();
+    }
+
     let mut result: Vec<SemanticChunk> = Vec::new();
-    let threshold = hard_min;
+    for chunk in chunks {
+        result.push(chunk);
+    }
 
-    let mut i = 0;
-    while i < chunks.len() {
-        let mut current = chunks[i].clone();
+    // Repeatedly find the shortest chunk below threshold and merge with shorter neighbor
+    loop {
+        let mut shortest_idx = None;
+        let mut shortest_dur = f64::MAX;
 
-        // Check if current chunk is below threshold
-        while current.end_sec - current.start_sec < threshold && i + 1 < chunks.len() {
-            // Merge with next chunk
-            let next = &chunks[i + 1];
-            current.end_sec = next.end_sec;
-            current.transcript_text =
-                format!("{} {}", current.transcript_text, next.transcript_text);
-            current.rationale = format!("{} + {}", current.rationale, next.rationale);
-            i += 1;
+        for (i, chunk) in result.iter().enumerate() {
+            let dur = chunk.end_sec - chunk.start_sec;
+            if dur < hard_min && dur < shortest_dur {
+                shortest_idx = Some(i);
+                shortest_dur = dur;
+            }
         }
 
-        if current.end_sec - current.start_sec < threshold && !result.is_empty() {
-            let previous = result.last_mut().expect("checked is_empty");
-            previous.end_sec = current.end_sec;
-            previous.transcript_text =
-                format!("{} {}", previous.transcript_text, current.transcript_text)
-                    .trim()
-                    .to_string();
-            previous.rationale = format!("{} + {}", previous.rationale, current.rationale);
+        let Some(idx) = shortest_idx else { break; };
+
+        // Determine which neighbor is shorter
+        let left_dur = if idx > 0 {
+            result[idx - 1].end_sec - result[idx - 1].start_sec
         } else {
-            result.push(current);
+            f64::MAX
+        };
+        let right_dur = if idx + 1 < result.len() {
+            result[idx + 1].end_sec - result[idx + 1].start_sec
+        } else {
+            f64::MAX
+        };
+
+        if left_dur == f64::MAX && right_dur == f64::MAX {
+            // No neighbors to merge with; keep as-is
+            break;
         }
-        i += 1;
+
+        if left_dur <= right_dur {
+            // Merge current into left neighbor
+            result[idx - 1].end_sec = result[idx].end_sec;
+            result[idx - 1].transcript_text = format!(
+                "{} {}",
+                result[idx - 1].transcript_text, result[idx].transcript_text
+            )
+            .trim()
+            .to_string();
+            result[idx - 1].rationale =
+                format!("{} + {}", result[idx - 1].rationale, result[idx].rationale);
+            result.remove(idx);
+        } else {
+            // Merge right neighbor into current
+            result[idx].end_sec = result[idx + 1].end_sec;
+            result[idx].transcript_text = format!(
+                "{} {}",
+                result[idx].transcript_text, result[idx + 1].transcript_text
+            )
+            .trim()
+            .to_string();
+            result[idx].rationale =
+                format!("{} + {}", result[idx].rationale, result[idx + 1].rationale);
+            result.remove(idx + 1);
+        }
     }
 
     result
 }
 
-fn split_long_chunks(chunks: Vec<SemanticChunk>, hard_max: f64) -> Vec<SemanticChunk> {
+fn split_long_chunks(
+    chunks: Vec<SemanticChunk>,
+    hard_max: f64,
+    target_min: f64,
+    target_max: f64,
+) -> Vec<SemanticChunk> {
     let mut result = Vec::new();
-    let threshold = hard_max;
 
     for chunk in chunks {
         let duration = chunk.end_sec - chunk.start_sec;
 
-        if duration <= threshold {
+        if duration <= hard_max {
             result.push(chunk);
         } else {
-            // Split this chunk
-            let target_duration = ((SPLIT_MIN + SPLIT_MAX) / 2.0).min(threshold / 2.0);
+            let target_duration = ((target_min + target_max) / 2.0).min(hard_max / 2.0);
             let num_splits = (duration / target_duration).ceil() as usize;
 
             let split_duration = duration / num_splits as f64;
@@ -135,7 +174,7 @@ mod tests {
             },
         ];
 
-        let result = normalize(chunks, 15.0, 120.0, "test_video");
+        let result = normalize(chunks, 15.0, 120.0, 30.0, 90.0, "test_video");
         assert_eq!(result.len(), 2);
         assert_eq!(result[0].chunk_id, "test_video_chunk_0000");
         assert_eq!(result[1].chunk_id, "test_video_chunk_0001");
@@ -160,7 +199,7 @@ mod tests {
             },
         ];
 
-        let result = normalize(chunks, 15.0, 120.0, "test_video");
+        let result = normalize(chunks, 15.0, 120.0, 30.0, 90.0, "test_video");
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].start_sec, 0.0);
         assert_eq!(result[0].end_sec, 60.0);
@@ -185,7 +224,7 @@ mod tests {
             },
         ];
 
-        let result = normalize(chunks, 15.0, 120.0, "test_video");
+        let result = normalize(chunks, 15.0, 120.0, 30.0, 90.0, "test_video");
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].start_sec, 0.0);
         assert_eq!(result[0].end_sec, 55.0);
@@ -201,7 +240,7 @@ mod tests {
             parent_segment_id: String::new(),
         }];
 
-        let result = normalize(chunks, 15.0, 120.0, "test_video");
+        let result = normalize(chunks, 15.0, 120.0, 30.0, 90.0, "test_video");
         assert!(result.len() > 1);
         assert_eq!(result[0].start_sec, 0.0);
         assert_eq!(result[result.len() - 1].end_sec, 200.0);
@@ -217,14 +256,14 @@ mod tests {
             parent_segment_id: String::new(),
         }];
 
-        let result = normalize(chunks, 15.0, 120.0, "my_video_123");
+        let result = normalize(chunks, 15.0, 120.0, 30.0, 90.0, "my_video_123");
         assert_eq!(result[0].chunk_id, "my_video_123_chunk_0000");
     }
 
     #[test]
     fn test_normalize_empty() {
         let chunks = vec![];
-        let result = normalize(chunks, 15.0, 120.0, "test");
+        let result = normalize(chunks, 15.0, 120.0, 30.0, 90.0, "test");
         assert_eq!(result.len(), 0);
     }
 }

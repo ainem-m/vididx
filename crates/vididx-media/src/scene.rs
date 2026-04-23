@@ -18,6 +18,7 @@ pub async fn detect_scene_changes(
     }
 
     let output = Command::new(ffmpeg_path)
+        .arg("-nostdin")
         .arg("-i")
         .arg(mp4_path)
         .arg("-vf")
@@ -28,33 +29,33 @@ pub async fn detect_scene_changes(
         .output()
         .map_err(|e| VididxError::Media(format!("ffmpeg scene detection failed: {}", e)))?;
 
-    let stderr = String::from_utf8(output.stderr).unwrap_or_default();
-    parse_scene_output(&stderr)
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    parse_scene_output(&stderr, threshold)
 }
 
 /// Parse ffmpeg scene detection output (showinfo).
 #[allow(clippy::collapsible_if)]
-fn parse_scene_output(output: &str) -> Result<Vec<SceneChange>, VididxError> {
+fn parse_scene_output(output: &str, threshold: f32) -> Result<Vec<SceneChange>, VididxError> {
     let mut changes = Vec::new();
 
     // Pattern: [Parsed_showinfo_... pts:value time:value
     // We extract the time value which is in format HH:MM:SS.mmm
     let timecode_regex = Regex::new(r"time=([\d:.]+)")
-        .map_err(|e| VididxError::Vision(format!("Regex compilation error: {}", e)))?;
+        .map_err(|e| VididxError::Media(format!("Regex compilation error: {}", e)))?;
     let pts_time_regex = Regex::new(r"pts_time:([\d.]+)")
-        .map_err(|e| VididxError::Vision(format!("Regex compilation error: {}", e)))?;
+        .map_err(|e| VididxError::Media(format!("Regex compilation error: {}", e)))?;
 
     for line in output.lines() {
         if let Some(caps) = timecode_regex.captures(line) {
             if let Ok(at_sec) = parse_timecode(&caps[1]) {
                 changes.push(SceneChange {
                     at_sec,
-                    score: 0.0, // ffmpeg doesn't easily expose the actual score
+                    score: threshold as f64, // Use the detection threshold as default score
                 });
             }
         } else if let Some(caps) = pts_time_regex.captures(line) {
             if let Ok(at_sec) = caps[1].parse::<f64>() {
-                changes.push(SceneChange { at_sec, score: 0.0 });
+                changes.push(SceneChange { at_sec, score: threshold as f64 });
             }
         }
     }
@@ -111,7 +112,7 @@ mod tests {
 [Parsed_showinfo_0 @ ...] n:2 pts:600 pts_time:20 time=00:00:20.500
 "#;
 
-        let changes = parse_scene_output(output).unwrap();
+        let changes = parse_scene_output(output, 0.4).unwrap();
         assert_eq!(changes.len(), 3);
         assert_eq!(changes[0].at_sec, 1.234);
         assert_eq!(changes[1].at_sec, 5.0);
@@ -121,7 +122,7 @@ mod tests {
     #[test]
     fn test_parse_scene_empty() {
         let output = "";
-        let changes = parse_scene_output(output).unwrap();
+        let changes = parse_scene_output(output, 0.4).unwrap();
         assert!(changes.is_empty());
     }
 }

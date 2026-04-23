@@ -23,13 +23,13 @@ use vididx_vision::{
 
 const STAGES: &[&str] = &[
     "stage0_probe",
-    "stage1_audio",
-    "stage2_asr",
-    "stage3_aux",
-    "stage4_coarse",
-    "stage5_frames",
-    "stage6_semantic",
-    "stage7_normalize",
+    "stage1_asr",
+    "stage2_aux",
+    "stage3_coarse",
+    "stage4_semantic",
+    "stage5_normalize",
+    "stage6_frames",
+    "stage7_vision",
     "stage8_annotate",
     "stage9_output",
 ];
@@ -42,12 +42,6 @@ struct FrameArtifact {
     analyzed: bool,
     ocr_text: Option<String>,
     visual_caption: Option<String>,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-struct AudioStageArtifact {
-    extracted: bool,
-    wav_path: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -94,36 +88,20 @@ pub async fn run_pipeline(ctx: JobContext) -> Result<(), VididxError> {
         return Ok(());
     }
 
-    let audio_stage = run_or_load_stage(&ctx, 1, &input_hash, async {
-        let audio_path = ctx.out_dir.join("audio").join("audio_16k.wav");
+    let audio_path = ctx.out_dir.join("audio").join("audio_16k.wav");
+    let transcript = run_or_load_stage(&ctx, 1, &input_hash, async {
         if media_probe.has_audio {
             extract_audio(&ctx.config.media.ffmpeg_path, &ctx.source_path, &audio_path).await?;
         }
-
-        Ok((
-            ctx.out_dir.join("audio.json"),
-            AudioStageArtifact {
-                extracted: media_probe.has_audio,
-                wav_path: audio_path.to_string_lossy().to_string(),
-            },
-        ))
+        let timeline = transcribe_or_empty(&ctx, &audio_path, media_probe.has_audio).await;
+        Ok((ctx.out_dir.join("transcript.json"), timeline))
     })
     .await?;
     if should_stop_after(&ctx, 1) {
         return Ok(());
     }
-    let audio_path = PathBuf::from(&audio_stage.wav_path);
 
-    let transcript = run_or_load_stage(&ctx, 2, &input_hash, async {
-        let timeline = transcribe_or_empty(&ctx, &audio_path, media_probe.has_audio).await;
-        Ok((ctx.out_dir.join("transcript.json"), timeline))
-    })
-    .await?;
-    if should_stop_after(&ctx, 2) {
-        return Ok(());
-    }
-
-    let aux = run_or_load_stage(&ctx, 3, &input_hash, async {
+    let aux = run_or_load_stage(&ctx, 2, &input_hash, async {
         let silence_intervals = if media_probe.has_audio {
             detect_silence(&ctx.config.media.ffmpeg_path, &ctx.source_path, -35.0, 0.5).await?
         } else {
@@ -150,13 +128,105 @@ pub async fn run_pipeline(ctx: JobContext) -> Result<(), VididxError> {
     .await?;
     let silence = aux.silence;
     let scenes = aux.scene;
-    if should_stop_after(&ctx, 3) {
+    if should_stop_after(&ctx, 2) {
         return Ok(());
     }
 
     let mode = ctx.config.segment.mode;
 
-    let frame_artifacts = run_or_load_stage(&ctx, 5, &input_hash, async {
+    let mut coarse = run_or_load_stage(&ctx, 3, &input_hash, async {
+        let coarse = coarse_segment(
+            media_probe.duration_sec,
+            &transcript,
+            &silence,
+            &scenes,
+            ctx.config.segment.coarse.max_duration_sec,
+            ctx.config.segment.coarse.snap_window_sec,
+        )?;
+        Ok((ctx.out_dir.join("coarse.json"), coarse))
+    })
+    .await?;
+    for seg in &mut coarse {
+        seg.segment_id = format!("{}_seg_{:04}", ctx.video_id, seg.index);
+    }
+    if should_stop_after(&ctx, 3) {
+        return Ok(());
+    }
+
+    let semantic = run_or_load_stage(&ctx, 4, &input_hash, async {
+        let semantic = match mode {
+            SegmentMode::Utterance => transcript
+                .segments
+                .iter()
+                .map(|s| SemanticChunk {
+                    start_sec: s.start_sec,
+                    end_sec: s.end_sec,
+                    transcript_text: s.text.clone(),
+                    rationale: "utterance-boundary".to_string(),
+                    parent_segment_id: String::new(),
+                })
+                .collect::<Vec<_>>(),
+            SegmentMode::Chapter => coarse
+                .iter()
+                .map(|seg| SemanticChunk {
+                    start_sec: seg.start_sec,
+                    end_sec: seg.end_sec,
+                    transcript_text: seg.transcript_text.clone(),
+                    rationale: "chapter (coarse only)".to_string(),
+                    parent_segment_id: seg.segment_id.clone(),
+                })
+                .collect::<Vec<_>>(),
+            SegmentMode::Semantic => coarse
+                .iter()
+                .flat_map(|segment| {
+                    heuristic_semantic_chunks(
+                        segment.start_sec,
+                        segment.end_sec,
+                        &transcript,
+                        ctx.config.segment.semantic.target_min_sec,
+                        ctx.config.segment.semantic.target_max_sec,
+                        &segment.segment_id,
+                    )
+                })
+                .collect::<Vec<_>>(),
+        };
+        Ok((ctx.out_dir.join("semantic.json"), semantic))
+    })
+    .await?;
+    if should_stop_after(&ctx, 4) {
+        return Ok(());
+    }
+
+    let normalized = run_or_load_stage(&ctx, 5, &input_hash, async {
+        let normalized = match mode {
+            SegmentMode::Utterance => {
+                utterance_to_chunks(&transcript, &ctx.config.segment.utterance, &ctx.video_id)
+            }
+            SegmentMode::Chapter => normalize(
+                semantic,
+                ctx.config.segment.semantic.hard_min_sec,
+                ctx.config.segment.semantic.hard_max_sec,
+                ctx.config.segment.semantic.target_min_sec,
+                ctx.config.segment.semantic.target_max_sec,
+                &ctx.video_id,
+            ),
+            SegmentMode::Semantic => normalize(
+                semantic,
+                ctx.config.segment.semantic.hard_min_sec,
+                ctx.config.segment.semantic.hard_max_sec,
+                ctx.config.segment.semantic.target_min_sec,
+                ctx.config.segment.semantic.target_max_sec,
+                &ctx.video_id,
+            ),
+        };
+        Ok((ctx.out_dir.join("normalized.json"), normalized))
+    })
+    .await?;
+    if should_stop_after(&ctx, 5) {
+        return Ok(());
+    }
+
+    let frame_artifacts = run_or_load_stage(&ctx, 6, &input_hash, async {
         let frames = if media_probe.has_video {
             let safe_end = if media_probe.duration_sec > 0.5 {
                 media_probe.duration_sec - 0.5
@@ -226,95 +296,7 @@ pub async fn run_pipeline(ctx: JobContext) -> Result<(), VididxError> {
         Ok((ctx.out_dir.join("frames.json"), frames))
     })
     .await?;
-    if should_stop_after(&ctx, 5) {
-        return Ok(());
-    }
-
-    let mut coarse = run_or_load_stage(&ctx, 4, &input_hash, async {
-        let coarse = coarse_segment(
-            media_probe.duration_sec,
-            &transcript,
-            &silence,
-            &scenes,
-            ctx.config.segment.coarse.max_duration_sec,
-            ctx.config.segment.coarse.snap_window_sec,
-        )?;
-        Ok((ctx.out_dir.join("coarse.json"), coarse))
-    })
-    .await?;
-    for seg in &mut coarse {
-        seg.segment_id = format!("{}_seg_{:04}", ctx.video_id, seg.index);
-    }
-    if should_stop_after(&ctx, 4) {
-        return Ok(());
-    }
-
-    let semantic = run_or_load_stage(&ctx, 6, &input_hash, async {
-        let semantic = match mode {
-            SegmentMode::Utterance => transcript
-                .segments
-                .iter()
-                .map(|s| SemanticChunk {
-                    start_sec: s.start_sec,
-                    end_sec: s.end_sec,
-                    transcript_text: s.text.clone(),
-                    rationale: "utterance-boundary".to_string(),
-                    parent_segment_id: String::new(),
-                })
-                .collect::<Vec<_>>(),
-            SegmentMode::Chapter => coarse
-                .iter()
-                .map(|seg| SemanticChunk {
-                    start_sec: seg.start_sec,
-                    end_sec: seg.end_sec,
-                    transcript_text: seg.transcript_text.clone(),
-                    rationale: "chapter (coarse only)".to_string(),
-                    parent_segment_id: seg.segment_id.clone(),
-                })
-                .collect::<Vec<_>>(),
-            SegmentMode::Semantic => coarse
-                .iter()
-                .flat_map(|segment| {
-                    heuristic_semantic_chunks(
-                        segment.start_sec,
-                        segment.end_sec,
-                        &transcript,
-                        ctx.config.segment.semantic.target_min_sec,
-                        ctx.config.segment.semantic.target_max_sec,
-                        &segment.segment_id,
-                    )
-                })
-                .collect::<Vec<_>>(),
-        };
-        Ok((ctx.out_dir.join("semantic.json"), semantic))
-    })
-    .await?;
     if should_stop_after(&ctx, 6) {
-        return Ok(());
-    }
-
-    let normalized = run_or_load_stage(&ctx, 7, &input_hash, async {
-        let normalized = match mode {
-            SegmentMode::Utterance => {
-                utterance_to_chunks(&transcript, &ctx.config.segment.utterance, &ctx.video_id)
-            }
-            SegmentMode::Chapter => normalize(
-                semantic,
-                ctx.config.segment.semantic.hard_min_sec,
-                ctx.config.segment.semantic.hard_max_sec,
-                &ctx.video_id,
-            ),
-            SegmentMode::Semantic => normalize(
-                semantic,
-                ctx.config.segment.semantic.hard_min_sec,
-                ctx.config.segment.semantic.hard_max_sec,
-                &ctx.video_id,
-            ),
-        };
-        Ok((ctx.out_dir.join("normalized.json"), normalized))
-    })
-    .await?;
-    if should_stop_after(&ctx, 7) {
         return Ok(());
     }
 
@@ -525,13 +507,13 @@ fn should_stop_after(ctx: &JobContext, stage_index: usize) -> bool {
 fn stage_artifact_path(ctx: &JobContext, stage_index: usize) -> PathBuf {
     match stage_index {
         0 => ctx.out_dir.join("probe.json"),
-        1 => ctx.out_dir.join("audio.json"),
-        2 => ctx.out_dir.join("transcript.json"),
-        3 => ctx.out_dir.join("aux.json"),
-        4 => ctx.out_dir.join("coarse.json"),
-        5 => ctx.out_dir.join("frames.json"),
-        6 => ctx.out_dir.join("semantic.json"),
-        7 => ctx.out_dir.join("normalized.json"),
+        1 => ctx.out_dir.join("transcript.json"),
+        2 => ctx.out_dir.join("aux.json"),
+        3 => ctx.out_dir.join("coarse.json"),
+        4 => ctx.out_dir.join("semantic.json"),
+        5 => ctx.out_dir.join("normalized.json"),
+        6 => ctx.out_dir.join("frames.json"),
+        7 => ctx.out_dir.join("vision.json"),
         8 => ctx.out_dir.join("annotated.json"),
         _ => unreachable!("invalid stage index"),
     }
@@ -1616,11 +1598,11 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+#[tokio::test]
     async fn test_cached_stage_output_path_reads_matching_manifest_entry() {
         let mut manifest = Manifest::new("test_video", "/tmp/test.mp4", "sha256:src", "sha256:cfg");
-        manifest.mark_running("stage3_aux", "sha256:input");
-        manifest.mark_done("stage3_aux", "/tmp/out/aux.json");
+        manifest.mark_running("stage2_aux", "sha256:input");
+        manifest.mark_done("stage2_aux", "/tmp/out/aux.json");
         let ctx = JobContext {
             video_id: "test_video".to_string(),
             source_type: "local_mp4".to_string(),
@@ -1633,7 +1615,7 @@ mod tests {
             manifest: std::sync::Arc::new(tokio::sync::Mutex::new(manifest)),
         };
 
-        let path = cached_stage_output_path(&ctx, "stage3_aux", "sha256:input").await;
+        let path = cached_stage_output_path(&ctx, "stage2_aux", "sha256:input").await;
 
         assert_eq!(path, Some(PathBuf::from("/tmp/out/aux.json")));
     }

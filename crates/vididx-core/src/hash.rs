@@ -16,9 +16,22 @@ pub fn sha256_str(s: &str) -> String {
 }
 
 /// Compute SHA-256 hash of a file and return as "sha256:<hex>" format.
+/// Uses streaming to avoid loading the entire file into memory.
 pub fn sha256_file(path: &Path) -> Result<String, VididxError> {
-    let data = std::fs::read(path)?;
-    Ok(sha256_bytes(&data))
+    use std::io::Read;
+    let file = std::fs::File::open(path)?;
+    let mut reader = std::io::BufReader::new(file);
+    let mut hasher = Sha256::new();
+    let mut buf = [0u8; 8192];
+    loop {
+        let n = reader.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    let hash = hasher.finalize();
+    Ok(format!("sha256:{}", hex::encode(hash)))
 }
 
 #[cfg(test)]
