@@ -30,16 +30,21 @@ pub async fn semantic_chunk(
     // Try LLM-based semantic chunking with one retry
     let result = llm_client.call_with_json_mode(system_prompt, &prompt).await;
 
+    let parent_segment_id = coarse.segment_id.clone();
     let chunks = match result {
         Ok(response) => {
-            match parse_and_validate_chunks(&response, coarse.end_sec) {
+            match parse_and_validate_chunks(&response, coarse.end_sec, &parent_segment_id) {
                 Ok(chunks) => chunks,
                 Err(_) => {
                     // Retry once on validation failure
                     let result = llm_client.call_with_json_mode(system_prompt, &prompt).await;
                     match result {
                         Ok(response) => {
-                            match parse_and_validate_chunks(&response, coarse.end_sec) {
+                            match parse_and_validate_chunks(
+                                &response,
+                                coarse.end_sec,
+                                &parent_segment_id,
+                            ) {
                                 Ok(chunks) => chunks,
                                 Err(_) => {
                                     // Fall back to equal division
@@ -101,6 +106,7 @@ fn render_semantic_prompt(
 fn parse_and_validate_chunks(
     response: &serde_json::Value,
     duration_sec: f64,
+    parent_segment_id: &str,
 ) -> Result<Vec<SemanticChunk>, VididxError> {
     let chunk_response: ChunkResponse = serde_json::from_value(response.clone())
         .map_err(|e| VididxError::Segment(format!("Failed to parse chunks: {}", e)))?;
@@ -160,6 +166,7 @@ fn parse_and_validate_chunks(
             end_sec: chunk.end_sec,
             transcript_text: text,
             rationale: chunk.rationale,
+            parent_segment_id: parent_segment_id.to_string(),
         });
     }
 
@@ -191,6 +198,7 @@ fn equal_division(coarse: &CoarseSegment, target_min: f64, target_max: f64) -> V
             end_sec: end,
             transcript_text: coarse.transcript_text.clone(),
             rationale: "Fallback equal division".to_string(),
+            parent_segment_id: coarse.segment_id.clone(),
         });
     }
 
@@ -204,6 +212,7 @@ mod tests {
     #[test]
     fn test_equal_division_single_chunk() {
         let coarse = CoarseSegment {
+            segment_id: "vid_seg_0000".to_string(),
             index: 0,
             start_sec: 0.0,
             end_sec: 100.0,
@@ -219,6 +228,7 @@ mod tests {
     #[test]
     fn test_equal_division_multiple_chunks() {
         let coarse = CoarseSegment {
+            segment_id: "vid_seg_0000".to_string(),
             index: 0,
             start_sec: 0.0,
             end_sec: 300.0,
@@ -248,7 +258,7 @@ mod tests {
             ]
         });
 
-        let chunks = parse_and_validate_chunks(&response, 100.0);
+        let chunks = parse_and_validate_chunks(&response, 100.0, "seg_0");
         assert!(chunks.is_ok());
         let chunks = chunks.unwrap();
         assert_eq!(chunks.len(), 2);
@@ -271,7 +281,7 @@ mod tests {
             ]
         });
 
-        let chunks = parse_and_validate_chunks(&response, 100.0);
+        let chunks = parse_and_validate_chunks(&response, 100.0, "seg_0");
         assert!(chunks.is_err());
     }
 }

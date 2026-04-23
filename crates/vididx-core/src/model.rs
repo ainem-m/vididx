@@ -131,6 +131,7 @@ pub struct MediaProbe {
 /// Coarse segment (粗分割).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CoarseSegment {
+    pub segment_id: String,
     pub index: usize,
     pub start_sec: f64,
     pub end_sec: f64,
@@ -144,6 +145,7 @@ pub struct SemanticChunk {
     pub end_sec: f64,
     pub transcript_text: String,
     pub rationale: String,
+    pub parent_segment_id: String,
 }
 
 /// Normalized chunk after post-processing.

@@ -45,6 +45,7 @@ pub fn coarse_segment(
         let transcript_text = collect_transcript(transcript, current_start, segment_end);
 
         segments.push(CoarseSegment {
+            segment_id: String::new(),
             index: segment_index,
             start_sec: current_start,
             end_sec: segment_end,

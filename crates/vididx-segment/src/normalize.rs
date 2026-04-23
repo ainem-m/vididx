@@ -89,6 +89,7 @@ fn split_long_chunks(chunks: Vec<SemanticChunk>, hard_max: f64) -> Vec<SemanticC
                     end_sec: end,
                     transcript_text: chunk.transcript_text.clone(),
                     rationale: format!("{} (part {})", chunk.rationale, j + 1),
+                    parent_segment_id: chunk.parent_segment_id.clone(),
                 });
             }
         }
@@ -103,7 +104,7 @@ fn assign_chunk_ids(chunks: Vec<SemanticChunk>, video_id: &str) -> Vec<Normalize
         .enumerate()
         .map(|(idx, chunk)| NormalizedChunk {
             chunk_id: format!("{video_id}_chunk_{idx:04}"),
-            parent_segment_id: String::new(),
+            parent_segment_id: chunk.parent_segment_id,
             start_sec: chunk.start_sec,
             end_sec: chunk.end_sec,
             transcript_text: chunk.transcript_text,
@@ -123,12 +124,14 @@ mod tests {
                 end_sec: 50.0,
                 transcript_text: "part 1".to_string(),
                 rationale: "intro".to_string(),
+                parent_segment_id: String::new(),
             },
             SemanticChunk {
                 start_sec: 50.0,
                 end_sec: 100.0,
                 transcript_text: "part 2".to_string(),
                 rationale: "main".to_string(),
+                parent_segment_id: String::new(),
             },
         ];
 
@@ -146,12 +149,14 @@ mod tests {
                 end_sec: 10.0,
                 transcript_text: "short".to_string(),
                 rationale: "intro".to_string(),
+                parent_segment_id: String::new(),
             },
             SemanticChunk {
                 start_sec: 10.0,
                 end_sec: 60.0,
                 transcript_text: "main".to_string(),
                 rationale: "content".to_string(),
+                parent_segment_id: String::new(),
             },
         ];
 
@@ -169,12 +174,14 @@ mod tests {
                 end_sec: 50.0,
                 transcript_text: "main".to_string(),
                 rationale: "content".to_string(),
+                parent_segment_id: String::new(),
             },
             SemanticChunk {
                 start_sec: 50.0,
                 end_sec: 55.0,
                 transcript_text: "tail".to_string(),
                 rationale: "tail".to_string(),
+                parent_segment_id: String::new(),
             },
         ];
 
@@ -191,6 +198,7 @@ mod tests {
             end_sec: 200.0,
             transcript_text: "very long content".to_string(),
             rationale: "long".to_string(),
+            parent_segment_id: String::new(),
         }];
 
         let result = normalize(chunks, 15.0, 120.0, "test_video");
@@ -206,6 +214,7 @@ mod tests {
             end_sec: 50.0,
             transcript_text: "test".to_string(),
             rationale: "test".to_string(),
+            parent_segment_id: String::new(),
         }];
 
         let result = normalize(chunks, 15.0, 120.0, "my_video_123");

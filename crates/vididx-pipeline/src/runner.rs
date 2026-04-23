@@ -226,7 +226,7 @@ pub async fn run_pipeline(ctx: JobContext) -> Result<(), VididxError> {
         return Ok(());
     }
 
-    let coarse = run_or_load_stage(&ctx, 4, &input_hash, async {
+    let mut coarse = run_or_load_stage(&ctx, 4, &input_hash, async {
         let coarse = coarse_segment(
             media_probe.duration_sec,
             &transcript,
@@ -238,6 +238,9 @@ pub async fn run_pipeline(ctx: JobContext) -> Result<(), VididxError> {
         Ok((ctx.out_dir.join("coarse.json"), coarse))
     })
     .await?;
+    for seg in &mut coarse {
+        seg.segment_id = format!("{}_seg_{:04}", ctx.video_id, seg.index);
+    }
     if should_stop_after(&ctx, 4) {
         return Ok(());
     }
@@ -252,6 +255,7 @@ pub async fn run_pipeline(ctx: JobContext) -> Result<(), VididxError> {
                     end_sec: s.end_sec,
                     transcript_text: s.text.clone(),
                     rationale: "utterance-boundary".to_string(),
+                    parent_segment_id: String::new(),
                 })
                 .collect::<Vec<_>>(),
             SegmentMode::Chapter => coarse
@@ -261,6 +265,7 @@ pub async fn run_pipeline(ctx: JobContext) -> Result<(), VididxError> {
                     end_sec: seg.end_sec,
                     transcript_text: seg.transcript_text.clone(),
                     rationale: "chapter (coarse only)".to_string(),
+                    parent_segment_id: seg.segment_id.clone(),
                 })
                 .collect::<Vec<_>>(),
             SegmentMode::Semantic => coarse
@@ -272,6 +277,7 @@ pub async fn run_pipeline(ctx: JobContext) -> Result<(), VididxError> {
                         &transcript,
                         ctx.config.segment.semantic.target_min_sec,
                         ctx.config.segment.semantic.target_max_sec,
+                        &segment.segment_id,
                     )
                 })
                 .collect::<Vec<_>>(),
@@ -544,7 +550,7 @@ fn select_frame_timestamps(
     } else {
         duration_sec
     };
-    let mut stamps = vec![0.0, (duration_sec / 2.0).min(safe_end)];
+    let mut stamps = Vec::new();
 
     if periodic_interval_sec > 0.0 {
         let mut t = periodic_interval_sec;
@@ -599,6 +605,7 @@ fn heuristic_semantic_chunks(
     transcript: &TranscriptTimeline,
     target_min_sec: f64,
     target_max_sec: f64,
+    parent_segment_id: &str,
 ) -> Vec<SemanticChunk> {
     let duration = (end_sec - start_sec).max(0.0);
     if duration <= 0.0 {
@@ -622,6 +629,7 @@ fn heuristic_semantic_chunks(
                 start_sec: chunk_start,
                 end_sec: chunk_end,
                 transcript_text: transcript_text_for_range(transcript, chunk_start, chunk_end),
+                parent_segment_id: parent_segment_id.to_string(),
                 rationale: if transcript.segments.is_empty() {
                     "time-based split without transcript".to_string()
                 } else {
@@ -656,15 +664,17 @@ fn fallback_annotate(chunk: &NormalizedChunk) -> AnnotatedChunk {
             format_time_range(chunk.start_sec, chunk.end_sec)
         )
     } else {
-        let mut words = transcript
+        let words = transcript
             .split_whitespace()
             .take(8)
             .collect::<Vec<_>>()
             .join(" ");
-        if words.len() > 60 {
-            words.truncate(60);
+        let mut chars = words.chars().collect::<Vec<_>>();
+        if chars.len() > 40 {
+            chars.truncate(37);
+            chars.extend(['.', '.', '.']);
         }
-        words
+        chars.into_iter().collect::<String>()
     };
 
     let summary = if transcript.is_empty() {
@@ -879,6 +889,9 @@ fn relocate_frames_to_chunk_dirs(
         return Ok(());
     }
 
+    // Clean up legacy flat directory (images/{video_id}/) after relocation
+    let legacy_dir = images_dir.join(&ctx.video_id);
+
     for chunk in chunks.iter_mut() {
         let chunk_img_dir = images_dir.join(&chunk.chunk_id);
         std::fs::create_dir_all(&chunk_img_dir).map_err(VididxError::Io)?;
@@ -892,9 +905,18 @@ fn relocate_frames_to_chunk_dirs(
                         .unwrap_or_else(|| std::ffi::OsStr::new("frame.jpg")),
                 );
                 std::fs::rename(&old_path, &new_path).map_err(VididxError::Io)?;
-                image_ref.path = new_path.to_string_lossy().to_string();
+                // Store as relative path from out_dir for portability
+                image_ref.path = new_path
+                    .strip_prefix(&ctx.out_dir)
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .unwrap_or_else(|_| new_path.to_string_lossy().into_owned());
             }
         }
+    }
+
+    // Remove legacy flat directory and any leftover dedup-excluded frames
+    if legacy_dir.exists() {
+        let _ = std::fs::remove_dir_all(&legacy_dir);
     }
 
     Ok(())
@@ -961,7 +983,11 @@ async fn enrich_frame_artifacts(
             .ok()
             .and_then(|text| {
                 let trimmed = text.trim();
-                (!trimmed.is_empty()).then(|| trimmed.to_string())
+                if trimmed.is_empty() || !is_meaningful_ocr_text(trimmed) {
+                    None
+                } else {
+                    Some(trimmed.to_string())
+                }
             });
     }
 
@@ -1035,6 +1061,23 @@ fn select_caption_frame_indices(
     selected.sort_unstable();
     selected.dedup();
     selected
+}
+
+/// Filter out OCR noise: too short, mostly symbols, or common UI artifacts.
+fn is_meaningful_ocr_text(text: &str) -> bool {
+    // Reject very short strings (likely icons or single letters)
+    if text.chars().count() < 3 {
+        return false;
+    }
+
+    // Reject if less than 40% alphabetic characters
+    let total = text.chars().count().max(1);
+    let alpha = text.chars().filter(|c| c.is_alphabetic()).count();
+    if alpha * 10 < total * 4 {
+        return false;
+    }
+
+    true
 }
 
 fn anthropic_client_from_env(ctx: &JobContext) -> Option<AnthropicClient> {
@@ -1142,7 +1185,7 @@ mod tests {
                 confidence: None,
             }],
         };
-        let chunks = heuristic_semantic_chunks(0.0, 180.0, &timeline, 30.0, 90.0);
+        let chunks = heuristic_semantic_chunks(0.0, 180.0, &timeline, 30.0, 90.0, "seg_0");
         assert!(!chunks.is_empty());
         assert_eq!(chunks.first().unwrap().start_sec, 0.0);
         assert_eq!(chunks.last().unwrap().end_sec, 180.0);
@@ -1175,7 +1218,7 @@ mod tests {
             ],
         };
 
-        let chunks = heuristic_semantic_chunks(0.0, 20.0, &timeline, 10.0, 10.0);
+        let chunks = heuristic_semantic_chunks(0.0, 20.0, &timeline, 10.0, 10.0, "seg_0");
 
         assert_eq!(chunks.len(), 2);
         assert_eq!(chunks[0].transcript_text, "intro");
