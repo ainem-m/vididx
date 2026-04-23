@@ -409,44 +409,58 @@ impl Config {
     /// Partial configs are allowed - only specified fields are overwritten.
     #[allow(clippy::collapsible_if)]
     fn merge_toml(config: &mut Config, toml: toml::Table) -> Result<(), VididxError> {
-        if let Some(val) = toml.get("general") {
-            if let Ok(partial) = val.clone().try_into::<GeneralConfig>() {
-                config.general = partial;
-            }
-        }
-        if let Some(val) = toml.get("media") {
-            if let Ok(partial) = val.clone().try_into::<MediaConfig>() {
-                config.media = partial;
-            }
-        }
-        if let Some(val) = toml.get("segment") {
-            if let Ok(partial) = val.clone().try_into::<SegmentConfig>() {
-                config.segment = partial;
-            }
-        }
-        if let Some(val) = toml.get("frames") {
-            if let Ok(partial) = val.clone().try_into::<FramesConfig>() {
-                config.frames = partial;
-            }
-        }
-        if let Some(val) = toml.get("asr") {
-            if let Ok(partial) = val.clone().try_into::<AsrConfig>() {
-                config.asr = partial;
-            }
-        }
-        if let Some(val) = toml.get("vision") {
-            if let Ok(partial) = val.clone().try_into::<VisionConfig>() {
-                config.vision = partial;
-            }
-        }
-        if let Some(val) = toml.get("llm") {
-            if let Ok(partial) = val.clone().try_into::<LlmConfig>() {
-                config.llm = partial;
-            }
-        }
-        if let Some(val) = toml.get("output") {
-            if let Ok(partial) = val.clone().try_into::<OutputConfig>() {
-                config.output = partial;
+        type MergeFn = fn(&mut Config, toml::Value) -> Result<(), String>;
+        let sections: [(&str, MergeFn); 8] = [
+            ("general", |c, v| {
+                v.try_into::<GeneralConfig>()
+                    .map(|p| c.general = p)
+                    .map_err(|e| e.to_string())
+            }),
+            ("media", |c, v| {
+                v.try_into::<MediaConfig>()
+                    .map(|p| c.media = p)
+                    .map_err(|e| e.to_string())
+            }),
+            ("segment", |c, v| {
+                v.try_into::<SegmentConfig>()
+                    .map(|p| c.segment = p)
+                    .map_err(|e| e.to_string())
+            }),
+            ("frames", |c, v| {
+                v.try_into::<FramesConfig>()
+                    .map(|p| c.frames = p)
+                    .map_err(|e| e.to_string())
+            }),
+            ("asr", |c, v| {
+                v.try_into::<AsrConfig>()
+                    .map(|p| c.asr = p)
+                    .map_err(|e| e.to_string())
+            }),
+            ("vision", |c, v| {
+                v.try_into::<VisionConfig>()
+                    .map(|p| c.vision = p)
+                    .map_err(|e| e.to_string())
+            }),
+            ("llm", |c, v| {
+                v.try_into::<LlmConfig>()
+                    .map(|p| c.llm = p)
+                    .map_err(|e| e.to_string())
+            }),
+            ("output", |c, v| {
+                v.try_into::<OutputConfig>()
+                    .map(|p| c.output = p)
+                    .map_err(|e| e.to_string())
+            }),
+        ];
+
+        for (key, merge_fn) in sections {
+            if let Some(val) = toml.get(key) {
+                if let Err(err) = merge_fn(config, val.clone()) {
+                    eprintln!(
+                        "[vididx-config] 警告: [{}] セクションの読み込みをスキップしました: {}",
+                        key, err
+                    );
+                }
             }
         }
         Ok(())
@@ -466,7 +480,7 @@ impl Config {
             "output": self.output,
         });
 
-        hash::sha256_str(&serde_json::to_string(&hashable).unwrap_or_default())
+        hash::sha256_str(&serde_json::to_string(&hashable).expect("config serialize"))
     }
 }
 

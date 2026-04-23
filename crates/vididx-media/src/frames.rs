@@ -67,11 +67,14 @@ fn extract_single_frame(
     // User provides 1-100, ffmpeg uses 1-31 where 1 is best
     let ffmpeg_quality = (32 - quality as i32 / 4).clamp(1, 31);
 
+    // Place -ss after -i for accurate frame seeking at the specified timestamp.
+    // This decodes all frames up to the target, which is slower but avoids
+    // keyframe-only seek inaccuracy. For short clips (≤2h) the overhead is acceptable.
     let output = Command::new(ffmpeg_path)
-        .arg("-ss")
-        .arg(seconds.to_string())
         .arg("-i")
         .arg(mp4_path)
+        .arg("-ss")
+        .arg(seconds.to_string())
         .arg("-frames:v")
         .arg("1")
         .arg("-q:v")

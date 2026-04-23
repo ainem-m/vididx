@@ -170,11 +170,15 @@ pub async fn run_pipeline(ctx: JobContext) -> Result<(), VididxError> {
                     .map(|s| s.start_sec.clamp(0.0, safe_end))
                     .collect::<Vec<_>>()
             } else {
+                let coarse_count = (media_probe.duration_sec
+                    / ctx.config.segment.coarse.max_duration_sec)
+                    .ceil()
+                    .max(1.0) as usize;
                 select_frame_timestamps(
                     media_probe.duration_sec,
                     &scenes,
                     ctx.config.frames.periodic_interval_sec,
-                    ctx.config.frames.max_analyzed_per_chunk.max(8),
+                    ctx.config.frames.max_analyzed_per_chunk * coarse_count,
                 )
             };
             let out_dir = ctx.out_dir.join("images").join(&ctx.video_id);
@@ -352,6 +356,7 @@ pub async fn run_pipeline(ctx: JobContext) -> Result<(), VididxError> {
         (manifest.source_path.clone(), manifest.source_hash.clone())
     };
 
+    let content_type = media_probe.guess_content_type();
     let mut chunks = build_chunks(
         &ctx,
         &source_path,
@@ -359,6 +364,7 @@ pub async fn run_pipeline(ctx: JobContext) -> Result<(), VididxError> {
         &annotated,
         &frame_artifacts,
         media_probe.has_audio,
+        content_type,
     );
 
     // Relocate frames to chunk-specific directories per SPEC.
@@ -670,7 +676,7 @@ fn fallback_annotate(chunk: &NormalizedChunk) -> AnnotatedChunk {
             .take(8)
             .collect::<Vec<_>>()
             .join(" ");
-        let mut chars = words.chars().collect::<Vec<_>>();
+        let mut chars: Vec<char> = words.chars().collect();
         if chars.len() > 40 {
             chars.truncate(37);
             chars.extend(['.', '.', '.']);
@@ -750,6 +756,7 @@ fn build_chunks(
     annotated: &[AnnotatedChunk],
     frame_artifacts: &[FrameArtifact],
     has_audio: bool,
+    content_type: ContentType,
 ) -> Vec<Chunk> {
     let last_chunk_id = annotated.last().map(|c| c.chunk_id.as_str());
     annotated
@@ -784,6 +791,7 @@ fn build_chunks(
                 &chunk.transcript_text,
                 ocr_text.as_deref(),
                 visual_caption.as_deref(),
+                &ctx.config.output.embedding_text_fields,
             );
 
             Chunk {
@@ -799,7 +807,7 @@ fn build_chunks(
                 start_tc: format_timecode(chunk.start_sec),
                 end_tc: format_timecode(chunk.end_sec),
                 duration_sec: (chunk.end_sec - chunk.start_sec).max(0.0),
-                content_type: ContentType::ScreenRecording,
+                content_type: content_type.clone(),
                 speaker_info: vec![],
                 title: chunk.title.clone(),
                 summary: chunk.summary.clone(),
@@ -841,21 +849,36 @@ fn build_embedding_text(
     transcript: &str,
     ocr_text: Option<&str>,
     visual_caption: Option<&str>,
+    fields: &[String],
 ) -> String {
     // Use filtered OCR for embedding to keep noise out of retrieval vectors.
     let ocr_for_embedding = ocr_text.map(filter_ocr_for_embedding);
-    [
-        Some(title.trim()),
-        Some(summary.trim()),
-        Some(transcript.trim()),
-        ocr_for_embedding.as_deref().filter(|s| !s.is_empty()),
-        visual_caption.map(str::trim),
-    ]
-    .into_iter()
-    .flatten()
-    .filter(|part| !part.is_empty())
-    .collect::<Vec<_>>()
-    .join("\n\n")
+
+    let mut parts: Vec<&str> = Vec::new();
+    for field in fields {
+        match field.as_str() {
+            "title" => parts.push(title.trim()),
+            "summary" => parts.push(summary.trim()),
+            "transcript" => parts.push(transcript.trim()),
+            "ocr_important" | "ocr" => {
+                if let Some(ocr) = ocr_for_embedding.as_deref().filter(|s| !s.is_empty()) {
+                    parts.push(ocr.trim());
+                }
+            }
+            "visual_caption" => {
+                if let Some(caption) = visual_caption {
+                    parts.push(caption.trim());
+                }
+            }
+            _ => {}
+        }
+    }
+
+    parts
+        .into_iter()
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n\n")
 }
 
 /// Extract and deduplicate OCR/caption data for a chunk.
@@ -1410,7 +1433,18 @@ mod tests {
 
     #[test]
     fn test_build_embedding_text_skips_empty_parts() {
-        let text = build_embedding_text("title", "", "body", None, None);
+        let text = build_embedding_text(
+            "title",
+            "",
+            "body",
+            None,
+            None,
+            &[
+                "title".to_string(),
+                "summary".to_string(),
+                "transcript".to_string(),
+            ],
+        );
         assert_eq!(text, "title\n\nbody");
     }
 
@@ -1444,7 +1478,11 @@ mod tests {
 
     #[test]
     fn test_build_chunks_includes_visual_analysis() {
-        let config = Config::default();
+        let mut config = Config::default();
+        config
+            .output
+            .embedding_text_fields
+            .push("visual_caption".to_string());
         let manifest = Manifest::new("test_video", "/tmp/test.mp4", "sha256:src", "sha256:cfg");
         let ctx = JobContext {
             video_id: "test_video".to_string(),
@@ -1493,6 +1531,7 @@ mod tests {
             &annotated,
             &frames,
             true,
+            ContentType::ScreenRecording,
         );
 
         assert_eq!(chunks.len(), 1);

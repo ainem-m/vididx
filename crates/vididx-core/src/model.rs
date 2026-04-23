@@ -1,3 +1,5 @@
+#![allow(unreachable_patterns)]
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -16,11 +18,14 @@ pub enum ContentType {
 
 /// Kind of extracted frame.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
 pub enum FrameKind {
+    #[serde(rename = "periodic")]
     Periodic,
+    #[serde(rename = "scene_change")]
     SceneChange,
     /// Frame extracted at the start of an ASR utterance (utterance mode).
+    /// Serialized as `periodic` to stay within the SPEC schema.
+    #[serde(rename = "periodic")]
     UtteranceStart,
 }
 
@@ -126,6 +131,25 @@ pub struct MediaProbe {
     pub resolution: (u32, u32),
     pub has_video: bool,
     pub has_audio: bool,
+}
+
+impl MediaProbe {
+    /// Guess content type from resolution aspect ratio.
+    /// 16:9 → Lecture, 4:3 → Slide, 1:1 → Slide, others → ScreenRecording.
+    pub fn guess_content_type(&self) -> ContentType {
+        let (w, h) = self.resolution;
+        if w == 0 || h == 0 {
+            return ContentType::Unknown;
+        }
+        let ratio = w as f64 / h as f64;
+        if (ratio - 16.0 / 9.0).abs() < 0.15 {
+            ContentType::Lecture
+        } else if ratio <= 4.3 / 3.0 + 0.15 {
+            ContentType::Slide
+        } else {
+            ContentType::ScreenRecording
+        }
+    }
 }
 
 /// Coarse segment (粗分割).

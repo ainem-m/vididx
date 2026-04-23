@@ -37,7 +37,7 @@ impl WhisperCppAdapter {
     /// Create from config.
     pub fn from_config(cfg: &vididx_core::WhisperCppConfig, language: &str) -> Self {
         Self {
-            binary_path: cfg.binary_path.clone(),
+            binary_path: expand_tilde(&cfg.binary_path),
             model_path: expand_tilde(&cfg.model_path),
             threads: cfg.threads,
             language: language.to_string(),
@@ -214,19 +214,7 @@ async fn is_tool_available(tool_path: &str) -> bool {
 }
 
 fn expand_tilde(path: &str) -> String {
-    if path == "~" {
-        return dirs::home_dir()
-            .map(|p| p.to_string_lossy().to_string())
-            .unwrap_or_else(|| path.to_string());
-    }
-
-    if let Some(stripped) = path.strip_prefix("~/") {
-        return dirs::home_dir()
-            .map(|p| p.join(stripped).to_string_lossy().to_string())
-            .unwrap_or_else(|| path.to_string());
-    }
-
-    path.to_string()
+    shellexpand::tilde(path).into_owned()
 }
 
 #[cfg(test)]
