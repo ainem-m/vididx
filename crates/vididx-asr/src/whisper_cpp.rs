@@ -92,7 +92,11 @@ impl AsrAdapter for WhisperCppAdapter {
             cmd.arg("--suppress-nst");
         }
 
-        cmd.arg("-oj").arg("-of").arg(&output_prefix_str).arg("-f").arg(wav_path);
+        cmd.arg("-oj")
+            .arg("-of")
+            .arg(&output_prefix_str)
+            .arg("-f")
+            .arg(wav_path);
 
         let output = cmd
             .output()

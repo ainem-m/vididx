@@ -15,6 +15,8 @@ pub struct JobContext {
     pub source_ref: String,
     pub source_path: PathBuf,
     pub out_dir: PathBuf,
+    pub from_stage: usize,
+    pub to_stage: usize,
     pub config: Config,
     pub manifest: Arc<Mutex<Manifest>>,
 }
@@ -122,6 +124,8 @@ mod tests {
             source_ref: "/path/to/video.mp4".to_string(),
             source_path: PathBuf::from("/path/to/video.mp4"),
             out_dir: temp_dir.path().to_path_buf(),
+            from_stage: 0,
+            to_stage: 9,
             config: Config::default(),
             manifest: Arc::new(Mutex::new(manifest)),
         };

@@ -26,3 +26,4 @@ tokio       = { version = "1", features = ["full"] }
 async-trait = "0.1"
 tracing     = "0.1"
 clap        = { version = "4", features = ["derive"] }
+chrono      = { version = "0.4", features = ["serde"] }

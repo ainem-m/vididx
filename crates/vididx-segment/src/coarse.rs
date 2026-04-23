@@ -10,7 +10,9 @@ pub fn coarse_segment(
     snap_window: f64,
 ) -> Result<Vec<CoarseSegment>, VididxError> {
     if duration_sec <= 0.0 {
-        return Err(VididxError::Segment("Duration must be positive".to_string()));
+        return Err(VididxError::Segment(
+            "Duration must be positive".to_string(),
+        ));
     }
 
     let mut segments = Vec::new();

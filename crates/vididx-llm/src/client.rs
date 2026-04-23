@@ -95,7 +95,10 @@ impl AnthropicClient {
         if !response.status().is_success() {
             let status = response.status();
             let body = response.text().await.unwrap_or_default();
-            return Err(VididxError::Llm(format!("API error ({}): {}", status, body)));
+            return Err(VididxError::Llm(format!(
+                "API error ({}): {}",
+                status, body
+            )));
         }
 
         let body = response

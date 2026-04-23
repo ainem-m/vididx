@@ -1,5 +1,6 @@
 use chrono::Utc;
-use serde::Serialize;
+use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -24,16 +25,16 @@ const STAGES: &[&str] = &[
     "stage0_probe",
     "stage1_audio",
     "stage2_asr",
-    "stage3_silence",
-    "stage4_scene",
+    "stage3_aux",
+    "stage4_coarse",
     "stage5_frames",
-    "stage6_coarse",
-    "stage7_semantic",
-    "stage8_normalize",
-    "stage9_annotate",
+    "stage6_semantic",
+    "stage7_normalize",
+    "stage8_annotate",
+    "stage9_output",
 ];
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 struct FrameArtifact {
     path: String,
     at_sec: f64,
@@ -41,6 +42,18 @@ struct FrameArtifact {
     analyzed: bool,
     ocr_text: Option<String>,
     visual_caption: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct AudioStageArtifact {
+    extracted: bool,
+    wav_path: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct AuxData {
+    silence: Vec<vididx_core::SilenceInterval>,
+    scene: Vec<SceneChange>,
 }
 
 #[derive(Debug)]
@@ -72,53 +85,51 @@ pub async fn run_pipeline(ctx: JobContext) -> Result<(), VididxError> {
         format!("{}:{}", manifest.source_hash, manifest.config_hash)
     };
 
-    let media_probe = run_stage(&ctx, STAGES[0], &input_hash, async {
+    let media_probe = run_or_load_stage(&ctx, 0, &input_hash, async {
         let result = probe(&ctx.config.media.ffprobe_path, &ctx.source_path).await?;
-        Ok((ctx.out_dir.join("stage0_probe.json"), result))
+        Ok((ctx.out_dir.join("probe.json"), result))
     })
     .await?;
+    if should_stop_after(&ctx, 0) {
+        return Ok(());
+    }
 
-    let audio_path = ctx.out_dir.join("audio").join("audio.wav");
-    let stage1_payload = run_stage(&ctx, STAGES[1], &input_hash, async {
+    let audio_stage = run_or_load_stage(&ctx, 1, &input_hash, async {
+        let audio_path = ctx.out_dir.join("audio").join("audio_16k.wav");
         if media_probe.has_audio {
             extract_audio(&ctx.config.media.ffmpeg_path, &ctx.source_path, &audio_path).await?;
         }
 
-        #[derive(Serialize)]
-        struct AudioStage {
-            extracted: bool,
-            wav_path: String,
-        }
-
         Ok((
-            ctx.out_dir.join("stage1_audio.json"),
-            AudioStage {
+            ctx.out_dir.join("audio.json"),
+            AudioStageArtifact {
                 extracted: media_probe.has_audio,
                 wav_path: audio_path.to_string_lossy().to_string(),
             },
         ))
     })
     .await?;
-    let _ = stage1_payload;
+    if should_stop_after(&ctx, 1) {
+        return Ok(());
+    }
+    let audio_path = PathBuf::from(&audio_stage.wav_path);
 
-    let transcript = run_stage(&ctx, STAGES[2], &input_hash, async {
+    let transcript = run_or_load_stage(&ctx, 2, &input_hash, async {
         let timeline = transcribe_or_empty(&ctx, &audio_path, media_probe.has_audio).await;
-        Ok((ctx.out_dir.join("stage2_asr.json"), timeline))
+        Ok((ctx.out_dir.join("transcript.json"), timeline))
     })
     .await?;
+    if should_stop_after(&ctx, 2) {
+        return Ok(());
+    }
 
-    let silence = run_stage(&ctx, STAGES[3], &input_hash, async {
-        let intervals = if media_probe.has_audio {
+    let aux = run_or_load_stage(&ctx, 3, &input_hash, async {
+        let silence_intervals = if media_probe.has_audio {
             detect_silence(&ctx.config.media.ffmpeg_path, &ctx.source_path, -35.0, 0.5).await?
         } else {
             Vec::new()
         };
-        Ok((ctx.out_dir.join("stage3_silence.json"), intervals))
-    })
-    .await?;
-
-    let scenes = run_stage(&ctx, STAGES[4], &input_hash, async {
-        let changes = if media_probe.has_video {
+        let scene_changes = if media_probe.has_video {
             detect_scene_changes(
                 &ctx.config.media.ffmpeg_path,
                 &ctx.source_path,
@@ -128,13 +139,24 @@ pub async fn run_pipeline(ctx: JobContext) -> Result<(), VididxError> {
         } else {
             Vec::new()
         };
-        Ok((ctx.out_dir.join("stage4_scene.json"), changes))
+        Ok((
+            ctx.out_dir.join("aux.json"),
+            AuxData {
+                silence: silence_intervals,
+                scene: scene_changes,
+            },
+        ))
     })
     .await?;
+    let silence = aux.silence;
+    let scenes = aux.scene;
+    if should_stop_after(&ctx, 3) {
+        return Ok(());
+    }
 
     let mode = ctx.config.segment.mode;
 
-    let frame_artifacts = run_stage(&ctx, STAGES[5], &input_hash, async {
+    let frame_artifacts = run_or_load_stage(&ctx, 5, &input_hash, async {
         let frames = if media_probe.has_video {
             let safe_end = if media_probe.duration_sec > 0.5 {
                 media_probe.duration_sec - 0.5
@@ -197,11 +219,14 @@ pub async fn run_pipeline(ctx: JobContext) -> Result<(), VididxError> {
         } else {
             Vec::new()
         };
-        Ok((ctx.out_dir.join("stage5_frames.json"), frames))
+        Ok((ctx.out_dir.join("frames.json"), frames))
     })
     .await?;
+    if should_stop_after(&ctx, 5) {
+        return Ok(());
+    }
 
-    let coarse = run_stage(&ctx, STAGES[6], &input_hash, async {
+    let coarse = run_or_load_stage(&ctx, 4, &input_hash, async {
         let coarse = coarse_segment(
             media_probe.duration_sec,
             &transcript,
@@ -210,11 +235,14 @@ pub async fn run_pipeline(ctx: JobContext) -> Result<(), VididxError> {
             ctx.config.segment.coarse.max_duration_sec,
             ctx.config.segment.coarse.snap_window_sec,
         )?;
-        Ok((ctx.out_dir.join("stage6_coarse.json"), coarse))
+        Ok((ctx.out_dir.join("coarse.json"), coarse))
     })
     .await?;
+    if should_stop_after(&ctx, 4) {
+        return Ok(());
+    }
 
-    let semantic = run_stage(&ctx, STAGES[7], &input_hash, async {
+    let semantic = run_or_load_stage(&ctx, 6, &input_hash, async {
         let semantic = match mode {
             SegmentMode::Utterance => transcript
                 .segments
@@ -248,29 +276,24 @@ pub async fn run_pipeline(ctx: JobContext) -> Result<(), VididxError> {
                 })
                 .collect::<Vec<_>>(),
         };
-        Ok((ctx.out_dir.join("stage7_semantic.json"), semantic))
+        Ok((ctx.out_dir.join("semantic.json"), semantic))
     })
     .await?;
+    if should_stop_after(&ctx, 6) {
+        return Ok(());
+    }
 
-    let normalized = run_stage(&ctx, STAGES[8], &input_hash, async {
+    let normalized = run_or_load_stage(&ctx, 7, &input_hash, async {
         let normalized = match mode {
             SegmentMode::Utterance => {
                 utterance_to_chunks(&transcript, &ctx.config.segment.utterance, &ctx.video_id)
             }
-            SegmentMode::Chapter => {
-                // Coarse segments are the final chunks; skip merge/split normalization.
-                semantic
-                    .into_iter()
-                    .enumerate()
-                    .map(|(idx, chunk)| NormalizedChunk {
-                        chunk_id: format!("{}_chunk_{idx:04}", ctx.video_id),
-                        parent_segment_id: String::new(),
-                        start_sec: chunk.start_sec,
-                        end_sec: chunk.end_sec,
-                        transcript_text: chunk.transcript_text,
-                    })
-                    .collect()
-            }
+            SegmentMode::Chapter => normalize(
+                semantic,
+                ctx.config.segment.semantic.hard_min_sec,
+                ctx.config.segment.semantic.hard_max_sec,
+                &ctx.video_id,
+            ),
             SegmentMode::Semantic => normalize(
                 semantic,
                 ctx.config.segment.semantic.hard_min_sec,
@@ -278,13 +301,16 @@ pub async fn run_pipeline(ctx: JobContext) -> Result<(), VididxError> {
                 &ctx.video_id,
             ),
         };
-        Ok((ctx.out_dir.join("stage8_normalize.json"), normalized))
+        Ok((ctx.out_dir.join("normalized.json"), normalized))
     })
     .await?;
+    if should_stop_after(&ctx, 7) {
+        return Ok(());
+    }
 
     let frame_artifacts = enrich_frame_artifacts(&ctx, frame_artifacts, &normalized).await;
 
-    let annotated = run_stage(&ctx, STAGES[9], &input_hash, async {
+    let annotated = run_or_load_stage(&ctx, 8, &input_hash, async {
         let llm_client = anthropic_client_from_env(&ctx);
         if llm_client.is_some() {
             eprintln!(
@@ -308,16 +334,19 @@ pub async fn run_pipeline(ctx: JobContext) -> Result<(), VididxError> {
             };
             annotated.push(item);
         }
-        Ok((ctx.out_dir.join("stage9_annotate.json"), annotated))
+        Ok((ctx.out_dir.join("annotated.json"), annotated))
     })
     .await?;
+    if should_stop_after(&ctx, 8) {
+        return Ok(());
+    }
 
     let (source_path, source_hash) = {
         let manifest = ctx.manifest.lock().await;
         (manifest.source_path.clone(), manifest.source_hash.clone())
     };
 
-    let chunks = build_chunks(
+    let mut chunks = build_chunks(
         &ctx,
         &source_path,
         &source_hash,
@@ -325,6 +354,10 @@ pub async fn run_pipeline(ctx: JobContext) -> Result<(), VididxError> {
         &frame_artifacts,
         media_probe.has_audio,
     );
+
+    // Relocate frames to chunk-specific directories per SPEC.
+    relocate_frames_to_chunk_dirs(&ctx, &mut chunks)?;
+
     write_chunks_jsonl(
         &chunks,
         &ctx.out_dir.join(format!("{}.chunks.jsonl", ctx.video_id)),
@@ -337,21 +370,35 @@ pub async fn run_pipeline(ctx: JobContext) -> Result<(), VididxError> {
     )
     .await?;
 
-    write_index(
-        &OutputIndex {
-            video_id: ctx.video_id.clone(),
-            total_chunks: chunks.len(),
-            total_duration_sec: media_probe.duration_sec,
-            chunks_file: format!("{}.chunks.jsonl", ctx.video_id),
-            markdown_file: format!("{}.md", ctx.video_id),
+    let index = OutputIndex {
+        video_id: ctx.video_id.clone(),
+        source_path: source_path.clone(),
+        source_hash: source_hash.clone(),
+        config_hash: {
+            let manifest = ctx.manifest.lock().await;
+            manifest.config_hash.clone()
         },
+        total_chunks: chunks.len(),
+        total_duration_sec: media_probe.duration_sec,
+        chunks_file: format!("{}.chunks.jsonl", ctx.video_id),
+        markdown_file: format!("{}.md", ctx.video_id),
+        generated_at: Utc::now(),
+    };
+    write_index(
+        &index,
         &ctx.out_dir.join(format!("{}.index.json", ctx.video_id)),
     )
     .await?;
 
-    let manifest_path = ctx.out_dir.join("manifest.json");
-    let manifest = ctx.manifest.lock().await;
-    manifest.save(&manifest_path).map_err(stage_error_to_vididx)?;
+    {
+        let mut manifest = ctx.manifest.lock().await;
+        let output_path = ctx.out_dir.join(format!("{}.chunks.jsonl", ctx.video_id));
+        manifest.mark_done("stage9_output", &output_path.to_string_lossy());
+        let manifest_path = ctx.out_dir.join("manifest.json");
+        manifest
+            .save(&manifest_path)
+            .map_err(stage_error_to_vididx)?;
+    }
 
     Ok(())
 }
@@ -397,6 +444,31 @@ where
     }
 }
 
+async fn run_or_load_stage<T, F>(
+    ctx: &JobContext,
+    stage_index: usize,
+    input_hash: &str,
+    f: F,
+) -> Result<T, VididxError>
+where
+    T: Serialize + DeserializeOwned,
+    F: std::future::Future<Output = Result<(PathBuf, T), VididxError>>,
+{
+    let stage_name = STAGES[stage_index];
+    if let Some(path) = cached_stage_output_path(ctx, stage_name, input_hash).await {
+        eprintln!("↺ {} (cached)", stage_name);
+        return read_json(&path);
+    }
+
+    if should_load_from_previous_run(ctx, stage_index) {
+        let path = stage_artifact_path(ctx, stage_index);
+        eprintln!("↺ {} (loaded)", STAGES[stage_index]);
+        return read_json(&path);
+    }
+
+    run_stage(ctx, stage_name, input_hash, f).await
+}
+
 async fn transcribe_or_empty(
     ctx: &JobContext,
     audio_path: &Path,
@@ -406,7 +478,8 @@ async fn transcribe_or_empty(
         return TranscriptTimeline { segments: vec![] };
     }
 
-    let adapter = WhisperCppAdapter::from_config(&ctx.config.asr.whisper_cpp, &ctx.config.asr.language);
+    let adapter =
+        WhisperCppAdapter::from_config(&ctx.config.asr.whisper_cpp, &ctx.config.asr.language);
 
     match adapter.transcribe(audio_path).await {
         Ok(timeline) => timeline,
@@ -415,6 +488,45 @@ async fn transcribe_or_empty(
             TranscriptTimeline { segments: vec![] }
         }
     }
+}
+
+fn should_load_from_previous_run(ctx: &JobContext, stage_index: usize) -> bool {
+    stage_index < ctx.from_stage
+}
+
+async fn cached_stage_output_path(
+    ctx: &JobContext,
+    stage_name: &str,
+    input_hash: &str,
+) -> Option<PathBuf> {
+    let manifest = ctx.manifest.lock().await;
+    manifest
+        .cached_output_path(stage_name, input_hash)
+        .map(PathBuf::from)
+}
+
+fn should_stop_after(ctx: &JobContext, stage_index: usize) -> bool {
+    stage_index == ctx.to_stage && stage_index < STAGES.len() - 1
+}
+
+fn stage_artifact_path(ctx: &JobContext, stage_index: usize) -> PathBuf {
+    match stage_index {
+        0 => ctx.out_dir.join("probe.json"),
+        1 => ctx.out_dir.join("audio.json"),
+        2 => ctx.out_dir.join("transcript.json"),
+        3 => ctx.out_dir.join("aux.json"),
+        4 => ctx.out_dir.join("coarse.json"),
+        5 => ctx.out_dir.join("frames.json"),
+        6 => ctx.out_dir.join("semantic.json"),
+        7 => ctx.out_dir.join("normalized.json"),
+        8 => ctx.out_dir.join("annotated.json"),
+        _ => unreachable!("invalid stage index"),
+    }
+}
+
+fn read_json<T: DeserializeOwned>(path: &Path) -> Result<T, VididxError> {
+    let bytes = std::fs::read(path)?;
+    serde_json::from_slice(&bytes).map_err(Into::into)
 }
 
 fn select_frame_timestamps(
@@ -758,6 +870,36 @@ fn collect_chunk_visual_data(
     (ocr_text, visual_caption)
 }
 
+fn relocate_frames_to_chunk_dirs(
+    ctx: &JobContext,
+    chunks: &mut [Chunk],
+) -> Result<(), VididxError> {
+    let images_dir = ctx.out_dir.join("images");
+    if !images_dir.exists() {
+        return Ok(());
+    }
+
+    for chunk in chunks.iter_mut() {
+        let chunk_img_dir = images_dir.join(&chunk.chunk_id);
+        std::fs::create_dir_all(&chunk_img_dir).map_err(VididxError::Io)?;
+
+        for image_ref in chunk.image_refs.iter_mut() {
+            let old_path = PathBuf::from(&image_ref.path);
+            if old_path.exists() && old_path.parent() != Some(&chunk_img_dir) {
+                let new_path = chunk_img_dir.join(
+                    old_path
+                        .file_name()
+                        .unwrap_or_else(|| std::ffi::OsStr::new("frame.jpg")),
+                );
+                std::fs::rename(&old_path, &new_path).map_err(VididxError::Io)?;
+                image_ref.path = new_path.to_string_lossy().to_string();
+            }
+        }
+    }
+
+    Ok(())
+}
+
 fn dedupe_frame_candidates(
     candidates: Vec<FrameCandidate>,
     distance_threshold: usize,
@@ -1050,6 +1192,8 @@ mod tests {
             source_ref: "/tmp/test.mp4".to_string(),
             source_path: PathBuf::from("/tmp/test.mp4"),
             out_dir: PathBuf::from("/tmp/out"),
+            from_stage: 0,
+            to_stage: 9,
             config,
             manifest: std::sync::Arc::new(tokio::sync::Mutex::new(manifest)),
         };
@@ -1111,10 +1255,87 @@ mod tests {
             source_ref: "/tmp/test.mp4".to_string(),
             source_path: PathBuf::from("/tmp/test.mp4"),
             out_dir: PathBuf::from("/tmp/out"),
+            from_stage: 0,
+            to_stage: 9,
             config,
             manifest: std::sync::Arc::new(tokio::sync::Mutex::new(manifest)),
         };
 
         assert_eq!(ocr_binary_path(&ctx), "custom-tesseract");
+    }
+
+    #[test]
+    fn test_should_load_from_previous_run_respects_from_stage() {
+        let ctx = JobContext {
+            video_id: "test_video".to_string(),
+            source_type: "local_mp4".to_string(),
+            source_ref: "/tmp/test.mp4".to_string(),
+            source_path: PathBuf::from("/tmp/test.mp4"),
+            out_dir: PathBuf::from("/tmp/out"),
+            from_stage: 4,
+            to_stage: 9,
+            config: Config::default(),
+            manifest: std::sync::Arc::new(tokio::sync::Mutex::new(Manifest::new(
+                "test_video",
+                "/tmp/test.mp4",
+                "sha256:src",
+                "sha256:cfg",
+            ))),
+        };
+
+        assert!(should_load_from_previous_run(&ctx, 0));
+        assert!(should_load_from_previous_run(&ctx, 3));
+        assert!(!should_load_from_previous_run(&ctx, 4));
+    }
+
+    #[test]
+    fn test_stage_artifact_path_maps_stage_numbers() {
+        let ctx = JobContext {
+            video_id: "test_video".to_string(),
+            source_type: "local_mp4".to_string(),
+            source_ref: "/tmp/test.mp4".to_string(),
+            source_path: PathBuf::from("/tmp/test.mp4"),
+            out_dir: PathBuf::from("/tmp/out"),
+            from_stage: 0,
+            to_stage: 9,
+            config: Config::default(),
+            manifest: std::sync::Arc::new(tokio::sync::Mutex::new(Manifest::new(
+                "test_video",
+                "/tmp/test.mp4",
+                "sha256:src",
+                "sha256:cfg",
+            ))),
+        };
+
+        assert_eq!(
+            stage_artifact_path(&ctx, 0),
+            PathBuf::from("/tmp/out/probe.json")
+        );
+        assert_eq!(
+            stage_artifact_path(&ctx, 8),
+            PathBuf::from("/tmp/out/annotated.json")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_cached_stage_output_path_reads_matching_manifest_entry() {
+        let mut manifest = Manifest::new("test_video", "/tmp/test.mp4", "sha256:src", "sha256:cfg");
+        manifest.mark_running("stage3_aux", "sha256:input");
+        manifest.mark_done("stage3_aux", "/tmp/out/aux.json");
+        let ctx = JobContext {
+            video_id: "test_video".to_string(),
+            source_type: "local_mp4".to_string(),
+            source_ref: "/tmp/test.mp4".to_string(),
+            source_path: PathBuf::from("/tmp/test.mp4"),
+            out_dir: PathBuf::from("/tmp/out"),
+            from_stage: 0,
+            to_stage: 9,
+            config: Config::default(),
+            manifest: std::sync::Arc::new(tokio::sync::Mutex::new(manifest)),
+        };
+
+        let path = cached_stage_output_path(&ctx, "stage3_aux", "sha256:input").await;
+
+        assert_eq!(path, Some(PathBuf::from("/tmp/out/aux.json")));
     }
 }

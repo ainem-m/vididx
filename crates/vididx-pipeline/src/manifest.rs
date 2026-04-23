@@ -72,6 +72,16 @@ impl Manifest {
         }
     }
 
+    /// Return the cached output path for a stage when the input hash matches.
+    pub fn cached_output_path(&self, stage_name: &str, input_hash: &str) -> Option<&str> {
+        self.stages.get(stage_name).and_then(|record| {
+            (record.status == StageStatus::Done
+                && record.input_hash == input_hash
+                && !record.output_path.is_empty())
+            .then_some(record.output_path.as_str())
+        })
+    }
+
     /// Mark a stage as running.
     pub fn mark_running(&mut self, stage_name: &str, input_hash: &str) {
         self.stages.insert(
@@ -162,6 +172,27 @@ mod tests {
         let manifest = Manifest::new("vid_001", "/path/video.mp4", "sha256:vid", "sha256:cfg");
 
         assert!(!manifest.is_cached("stage0", "hash123"));
+    }
+
+    #[test]
+    fn test_cached_output_path_hit() {
+        let mut manifest = Manifest::new("vid_001", "/path/video.mp4", "sha256:vid", "sha256:cfg");
+        manifest.mark_running("stage0", "hash123");
+        manifest.mark_done("stage0", "output/stage0.json");
+
+        assert_eq!(
+            manifest.cached_output_path("stage0", "hash123"),
+            Some("output/stage0.json")
+        );
+    }
+
+    #[test]
+    fn test_cached_output_path_miss_on_hash_mismatch() {
+        let mut manifest = Manifest::new("vid_001", "/path/video.mp4", "sha256:vid", "sha256:cfg");
+        manifest.mark_running("stage0", "hash123");
+        manifest.mark_done("stage0", "output/stage0.json");
+
+        assert_eq!(manifest.cached_output_path("stage0", "hash999"), None);
     }
 
     #[test]

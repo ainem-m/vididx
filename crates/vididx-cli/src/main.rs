@@ -116,6 +116,12 @@ struct EstimateInfo {
     size_mb: f64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ToolRequirement {
+    name: &'static str,
+    command: String,
+}
+
 const DIRECT_VIDEO_EXTENSIONS: &[&str] = &["mp4", "m4v", "mov", "webm", "mkv"];
 
 #[tokio::main]
@@ -159,13 +165,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 async fn process_command(
     video: String,
     video_id: Option<String>,
-    _from: Option<usize>,
-    _to: Option<usize>,
+    from: Option<usize>,
+    to: Option<usize>,
     force: bool,
     output: Option<PathBuf>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let video_input = classify_video_input(&video)?;
     let config = Config::load(None)?;
+    let (from_stage, to_stage) = normalize_stage_range(from, to)?;
+    run_preflight_checks(&config, &video_input, from_stage, to_stage)?;
 
     let vid_id = video_id
         .unwrap_or_else(|| default_video_id(&video_input).unwrap_or_else(|| "video".to_string()));
@@ -195,11 +203,16 @@ async fn process_command(
         source_ref: prepared.source_ref.clone(),
         source_path: prepared.local_video_path.clone(),
         out_dir,
+        from_stage,
+        to_stage,
         config,
         manifest: Arc::new(Mutex::new(manifest)),
     };
 
-    eprintln!("Processing video: {}", prepared.source_ref);
+    eprintln!(
+        "Processing video: {} (stages {}-{})",
+        prepared.source_ref, from_stage, to_stage
+    );
     run_pipeline(ctx).await?;
 
     eprintln!("✓ Processing complete");
@@ -445,8 +458,110 @@ fn bytes_to_mb(bytes: u64) -> f64 {
     bytes as f64 / (1024.0 * 1024.0)
 }
 
+fn normalize_stage_range(
+    from: Option<usize>,
+    to: Option<usize>,
+) -> Result<(usize, usize), Box<dyn std::error::Error>> {
+    let from_stage = from.unwrap_or(0);
+    let to_stage = to.unwrap_or(9);
+
+    if from_stage > 9 {
+        return Err(format!("Invalid --from stage {}. Expected 0-9.", from_stage).into());
+    }
+    if to_stage > 9 {
+        return Err(format!("Invalid --to stage {}. Expected 0-9.", to_stage).into());
+    }
+    if from_stage > to_stage {
+        return Err(format!(
+            "Invalid stage range: --from {} is greater than --to {}.",
+            from_stage, to_stage
+        )
+        .into());
+    }
+
+    Ok((from_stage, to_stage))
+}
+
+fn stage_range_includes(from_stage: usize, to_stage: usize, stage: usize) -> bool {
+    (from_stage..=to_stage).contains(&stage)
+}
+
+fn tool_requirements(
+    config: &Config,
+    input: &VideoInput,
+    from_stage: usize,
+    to_stage: usize,
+) -> Result<Vec<ToolRequirement>, String> {
+    let mut requirements = Vec::new();
+
+    if from_stage == 0 {
+        requirements.push(ToolRequirement {
+            name: "ffprobe",
+            command: config.media.ffprobe_path.clone(),
+        });
+    }
+
+    if stage_range_includes(from_stage, to_stage, 1)
+        || stage_range_includes(from_stage, to_stage, 3)
+        || stage_range_includes(from_stage, to_stage, 4)
+        || stage_range_includes(from_stage, to_stage, 5)
+    {
+        requirements.push(ToolRequirement {
+            name: "ffmpeg",
+            command: config.media.ffmpeg_path.clone(),
+        });
+    }
+
+    if stage_range_includes(from_stage, to_stage, 2) && config.asr.adapter == "whisper_cpp" {
+        requirements.push(ToolRequirement {
+            name: "whisper-cli",
+            command: config.asr.whisper_cpp.binary_path.clone(),
+        });
+    }
+
+    if to_stage == 9 && config.vision.ocr.adapter == "tesseract" {
+        requirements.push(ToolRequirement {
+            name: "tesseract",
+            command: config.vision.ocr.adapter.clone(),
+        });
+    }
+
+    if matches!(input, VideoInput::WebUrl(_)) {
+        let downloader = configured_url_downloader(config).map_err(|err| err.to_string())?;
+        requirements.push(ToolRequirement {
+            name: "yt-dlp",
+            command: downloader.to_string(),
+        });
+    }
+
+    Ok(requirements)
+}
+
+fn run_preflight_checks(
+    config: &Config,
+    input: &VideoInput,
+    from_stage: usize,
+    to_stage: usize,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let requirements =
+        tool_requirements(config, input, from_stage, to_stage).map_err(|err| err.to_string())?;
+    let mut failures = Vec::new();
+
+    for requirement in requirements {
+        if let Err(err) = ensure_tool_available(&requirement.command) {
+            failures.push(format!("{} ({})", requirement.name, err));
+        }
+    }
+
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(format!("Pre-flight check failed: {}", failures.join(", ")).into())
+    }
+}
+
 fn ensure_tool_available(tool: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let output = Command::new(tool).arg("--version").output()?;
+    let output = Command::new(tool).arg("-version").output()?;
     if output.status.success() {
         Ok(())
     } else {
@@ -759,6 +874,79 @@ mod tests {
             }
             _ => panic!("Expected Process command"),
         }
+    }
+
+    #[test]
+    fn test_tool_requirements_local_input_includes_core_local_tools() {
+        let config = Config::default();
+        let input = VideoInput::LocalPath(PathBuf::from("video.mp4"));
+
+        let requirements = tool_requirements(&config, &input, 0, 9).unwrap();
+        let commands = requirements
+            .iter()
+            .map(|item| item.command.as_str())
+            .collect::<Vec<_>>();
+
+        assert!(commands.contains(&"ffmpeg"));
+        assert!(commands.contains(&"ffprobe"));
+        assert!(commands.contains(&"whisper-cli"));
+        assert!(commands.contains(&"tesseract"));
+        assert!(!commands.contains(&"yt-dlp"));
+    }
+
+    #[test]
+    fn test_tool_requirements_url_input_includes_url_downloader() {
+        let mut config = Config::default();
+        config.media.url_downloader = Some("yt-dlp".to_string());
+        let input = VideoInput::WebUrl(Url::parse("https://example.com/video.mp4").unwrap());
+
+        let requirements = tool_requirements(&config, &input, 0, 9).unwrap();
+        let commands = requirements
+            .iter()
+            .map(|item| item.command.as_str())
+            .collect::<Vec<_>>();
+
+        assert!(commands.contains(&"yt-dlp"));
+    }
+
+    #[test]
+    fn test_tool_requirements_url_input_errors_when_downloader_disabled() {
+        let config = Config::default();
+        let input = VideoInput::WebUrl(Url::parse("https://example.com/video.mp4").unwrap());
+
+        let result = tool_requirements(&config, &input, 0, 9);
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("URL input is disabled"));
+    }
+
+    #[test]
+    fn test_tool_requirements_later_stage_skips_earlier_tools() {
+        let config = Config::default();
+        let input = VideoInput::LocalPath(PathBuf::from("video.mp4"));
+
+        let requirements = tool_requirements(&config, &input, 8, 9).unwrap();
+        let commands = requirements
+            .iter()
+            .map(|item| item.command.as_str())
+            .collect::<Vec<_>>();
+
+        assert!(!commands.contains(&"ffmpeg"));
+        assert!(!commands.contains(&"ffprobe"));
+        assert!(!commands.contains(&"whisper-cli"));
+        assert!(commands.contains(&"tesseract"));
+    }
+
+    #[test]
+    fn test_normalize_stage_range_defaults_to_full_pipeline() {
+        let range = normalize_stage_range(None, None).unwrap();
+        assert_eq!(range, (0, 9));
+    }
+
+    #[test]
+    fn test_normalize_stage_range_rejects_inverted_range() {
+        let result = normalize_stage_range(Some(7), Some(3));
+        assert!(result.is_err());
     }
 
     #[test]

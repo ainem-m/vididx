@@ -1,3 +1,4 @@
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::fs::{File, create_dir_all};
 use std::io::{BufWriter, Write};
@@ -7,10 +8,14 @@ use vididx_core::{AnnotatedChunk, Chunk, VididxError};
 #[derive(Debug, Serialize, Deserialize)]
 pub struct OutputIndex {
     pub video_id: String,
+    pub source_path: String,
+    pub source_hash: String,
+    pub config_hash: String,
     pub total_chunks: usize,
     pub total_duration_sec: f64,
     pub chunks_file: String,
     pub markdown_file: String,
+    pub generated_at: DateTime<Utc>,
 }
 
 /// Write annotated chunks to a JSONL file (one JSON object per line).
@@ -108,7 +113,16 @@ pub async fn write_markdown(
         .map_err(VididxError::Io)?;
 
         writeln!(writer, "**Summary:** {}\n", chunk.summary).map_err(VididxError::Io)?;
-        writeln!(writer, "**Keywords:** {}\n", chunk.keywords.join(", ")).map_err(VididxError::Io)?;
+        writeln!(writer, "**Keywords:** {}\n", chunk.keywords.join(", "))
+            .map_err(VididxError::Io)?;
+
+        if let Some(ref ocr) = chunk.ocr_text {
+            writeln!(writer, "**OCR:** {}\n", ocr).map_err(VididxError::Io)?;
+        }
+
+        if let Some(ref caption) = chunk.visual_caption {
+            writeln!(writer, "**Visual Caption:** {}\n", caption).map_err(VididxError::Io)?;
+        }
 
         for image_ref in &chunk.image_refs {
             let rel_path = relative_image_path(&image_ref.path, md_dir);
@@ -120,6 +134,14 @@ pub async fn write_markdown(
             writeln!(writer, "**Transcript:**\n```\n{}\n```\n", chunk.transcript)
                 .map_err(VididxError::Io)?;
         }
+
+        let flags = &chunk.modality_flags;
+        writeln!(
+            writer,
+            "**Modality:** speech={}, ocr={}, visual={}\n",
+            flags.has_speech, flags.has_ocr, flags.has_visual
+        )
+        .map_err(VididxError::Io)?;
 
         writeln!(writer, "\n---\n").map_err(VididxError::Io)?;
     }
@@ -222,8 +244,8 @@ mod tests {
             title: "Test Title".to_string(),
             summary: "Test summary".to_string(),
             transcript: "Test content".to_string(),
-            ocr_text: None,
-            visual_caption: None,
+            ocr_text: Some("OCR text".to_string()),
+            visual_caption: Some("Visual caption".to_string()),
             keywords: vec!["test".to_string()],
             embedding_text: "Test Title\nTest summary\nTest content".to_string(),
             image_refs: vec![ImageRef {
@@ -238,7 +260,7 @@ mod tests {
             },
             modality_flags: ModalityFlags {
                 has_speech: true,
-                has_ocr: false,
+                has_ocr: true,
                 has_visual: true,
             },
             processing_meta: ProcessingMeta {
@@ -258,6 +280,9 @@ mod tests {
         assert!(content.contains("Test Title"));
         assert!(content.contains("Test summary"));
         assert!(content.contains("![Frame at"));
+        assert!(content.contains("**OCR:** OCR text"));
+        assert!(content.contains("**Visual Caption:** Visual caption"));
+        assert!(content.contains("**Modality:** speech=true, ocr=true, visual=true"));
     }
 
     #[tokio::test]
@@ -267,10 +292,14 @@ mod tests {
 
         let index = OutputIndex {
             video_id: "test_video".to_string(),
+            source_path: "/tmp/test.mp4".to_string(),
+            source_hash: "sha256:abc".to_string(),
+            config_hash: "sha256:cfg".to_string(),
             total_chunks: 1,
             total_duration_sec: 50.0,
             chunks_file: "chunks.jsonl".to_string(),
             markdown_file: "output.md".to_string(),
+            generated_at: Utc::now(),
         };
 
         let result = write_index(&index, &output_path).await;
@@ -279,5 +308,7 @@ mod tests {
 
         let content = std::fs::read_to_string(&output_path).unwrap();
         assert!(content.contains("test_video"));
+        assert!(content.contains("sha256:abc"));
+        assert!(content.contains("sha256:cfg"));
     }
 }

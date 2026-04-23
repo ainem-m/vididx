@@ -1,7 +1,5 @@
 use vididx_core::{NormalizedChunk, SemanticChunk};
 
-const MIN_DURATION: f64 = 15.0;
-const MAX_DURATION: f64 = 120.0;
 const SPLIT_MIN: f64 = 30.0;
 const SPLIT_MAX: f64 = 90.0;
 
@@ -28,7 +26,7 @@ pub fn normalize(
 
 fn merge_short_chunks(chunks: Vec<SemanticChunk>, hard_min: f64) -> Vec<SemanticChunk> {
     let mut result: Vec<SemanticChunk> = Vec::new();
-    let threshold = hard_min.min(MIN_DURATION);
+    let threshold = hard_min;
 
     let mut i = 0;
     while i < chunks.len() {
@@ -64,7 +62,7 @@ fn merge_short_chunks(chunks: Vec<SemanticChunk>, hard_min: f64) -> Vec<Semantic
 
 fn split_long_chunks(chunks: Vec<SemanticChunk>, hard_max: f64) -> Vec<SemanticChunk> {
     let mut result = Vec::new();
-    let threshold = hard_max.max(MAX_DURATION);
+    let threshold = hard_max;
 
     for chunk in chunks {
         let duration = chunk.end_sec - chunk.start_sec;

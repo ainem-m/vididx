@@ -137,14 +137,18 @@ fn parse_and_validate_chunks(
         }
 
         if (current.end_sec - next.start_sec).abs() > 0.01 {
-            return Err(VididxError::Segment("Chunks must be continuous".to_string()));
+            return Err(VididxError::Segment(
+                "Chunks must be continuous".to_string(),
+            ));
         }
     }
 
     // Check all chunks have positive duration
     for chunk in &chunk_response.chunks {
         if chunk.end_sec <= chunk.start_sec {
-            return Err(VididxError::Segment("Chunk end must be > start".to_string()));
+            return Err(VididxError::Segment(
+                "Chunk end must be > start".to_string(),
+            ));
         }
     }
 
