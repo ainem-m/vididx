@@ -362,7 +362,8 @@ pub async fn run_pipeline(ctx: JobContext) -> Result<(), VididxError> {
     );
 
     // Relocate frames to chunk-specific directories per SPEC.
-    relocate_frames_to_chunk_dirs(&ctx, &mut chunks)?;
+    let frame_artifacts = relocate_frames_to_chunk_dirs(&ctx, &mut chunks, frame_artifacts)?;
+    write_json_pretty(&ctx.out_dir.join("frames.json"), &frame_artifacts)?;
 
     write_chunks_jsonl(
         &chunks,
@@ -750,12 +751,21 @@ fn build_chunks(
     frame_artifacts: &[FrameArtifact],
     has_audio: bool,
 ) -> Vec<Chunk> {
+    let last_chunk_id = annotated.last().map(|c| c.chunk_id.as_str());
     annotated
         .iter()
         .map(|chunk| {
+            let is_last = last_chunk_id == Some(&chunk.chunk_id);
             let image_refs = frame_artifacts
                 .iter()
-                .filter(|frame| frame.at_sec >= chunk.start_sec && frame.at_sec <= chunk.end_sec)
+                .filter(|frame| {
+                    frame.at_sec >= chunk.start_sec
+                        && if is_last {
+                            frame.at_sec <= chunk.end_sec
+                        } else {
+                            frame.at_sec < chunk.end_sec
+                        }
+                })
                 .map(|frame| ImageRef {
                     path: frame.path.clone(),
                     at_sec: frame.at_sec,
@@ -883,43 +893,86 @@ fn collect_chunk_visual_data(
 fn relocate_frames_to_chunk_dirs(
     ctx: &JobContext,
     chunks: &mut [Chunk],
-) -> Result<(), VididxError> {
+    mut frame_artifacts: Vec<FrameArtifact>,
+) -> Result<Vec<FrameArtifact>, VididxError> {
     let images_dir = ctx.out_dir.join("images");
     if !images_dir.exists() {
-        return Ok(());
+        return Ok(frame_artifacts);
     }
 
-    // Clean up legacy flat directory (images/{video_id}/) after relocation
-    let legacy_dir = images_dir.join(&ctx.video_id);
-
-    for chunk in chunks.iter_mut() {
+    // Build a map: frame filename -> target chunk directory.
+    // With half-open intervals in build_chunks, each frame belongs to exactly one chunk.
+    let mut frame_targets: std::collections::HashMap<String, PathBuf> =
+        std::collections::HashMap::new();
+    for chunk in chunks.iter() {
         let chunk_img_dir = images_dir.join(&chunk.chunk_id);
         std::fs::create_dir_all(&chunk_img_dir).map_err(VididxError::Io)?;
+        for image_ref in &chunk.image_refs {
+            let filename = Path::new(&image_ref.path)
+                .file_name()
+                .map(|f| f.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "frame.jpg".to_string());
+            frame_targets
+                .entry(filename)
+                .or_insert(chunk_img_dir.clone());
+        }
+    }
 
+    // Move each unique frame to its target directory and compute new relative paths.
+    let mut moved_paths: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
+    for chunk in chunks.iter_mut() {
         for image_ref in chunk.image_refs.iter_mut() {
             let old_path = PathBuf::from(&image_ref.path);
-            if old_path.exists() && old_path.parent() != Some(&chunk_img_dir) {
-                let new_path = chunk_img_dir.join(
-                    old_path
-                        .file_name()
-                        .unwrap_or_else(|| std::ffi::OsStr::new("frame.jpg")),
-                );
-                std::fs::rename(&old_path, &new_path).map_err(VididxError::Io)?;
-                // Store as relative path from out_dir for portability
-                image_ref.path = new_path
+            let filename = old_path
+                .file_name()
+                .map(|f| f.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "frame.jpg".to_string());
+
+            if let Some(target_dir) = frame_targets.get(&filename) {
+                let new_abs = target_dir.join(&filename);
+
+                // Move file only once.
+                if old_path.exists() && old_path.parent() != Some(target_dir.as_path()) {
+                    std::fs::rename(&old_path, &new_abs).map_err(VididxError::Io)?;
+                }
+
+                // Always store as a relative path from out_dir.
+                let rel = new_abs
                     .strip_prefix(&ctx.out_dir)
                     .map(|p| p.to_string_lossy().into_owned())
-                    .unwrap_or_else(|_| new_path.to_string_lossy().into_owned());
+                    .unwrap_or_else(|_| new_abs.to_string_lossy().into_owned());
+                moved_paths.insert(filename, rel.clone());
+                image_ref.path = rel;
             }
         }
     }
 
-    // Remove legacy flat directory and any leftover dedup-excluded frames
+    // Update frame_artifacts with the new paths as well.
+    for frame in &mut frame_artifacts {
+        let filename = Path::new(&frame.path)
+            .file_name()
+            .map(|f| f.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "frame.jpg".to_string());
+        if let Some(new_path) = moved_paths.get(&filename) {
+            frame.path = new_path.clone();
+        } else {
+            // Fallback: relativize even if the file was not in any chunk target.
+            let p = PathBuf::from(&frame.path);
+            frame.path = p
+                .strip_prefix(&ctx.out_dir)
+                .map(|r| r.to_string_lossy().into_owned())
+                .unwrap_or_else(|_| frame.path.clone());
+        }
+    }
+
+    // Remove legacy flat directory and any leftover dedup-excluded frames.
+    let legacy_dir = images_dir.join(&ctx.video_id);
     if legacy_dir.exists() {
         let _ = std::fs::remove_dir_all(&legacy_dir);
     }
 
-    Ok(())
+    Ok(frame_artifacts)
 }
 
 fn dedupe_frame_candidates(
