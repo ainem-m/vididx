@@ -842,11 +842,13 @@ fn build_embedding_text(
     ocr_text: Option<&str>,
     visual_caption: Option<&str>,
 ) -> String {
+    // Use filtered OCR for embedding to keep noise out of retrieval vectors.
+    let ocr_for_embedding = ocr_text.map(filter_ocr_for_embedding);
     [
         Some(title.trim()),
         Some(summary.trim()),
         Some(transcript.trim()),
-        ocr_text.map(str::trim),
+        ocr_for_embedding.as_deref().filter(|s| !s.is_empty()),
         visual_caption.map(str::trim),
     ]
     .into_iter()
@@ -856,14 +858,17 @@ fn build_embedding_text(
     .join("\n\n")
 }
 
+/// Extract and deduplicate OCR/caption data for a chunk.
+/// Returns (raw_ocr_text, visual_caption) where raw_ocr preserves the original
+/// filtered at line-level for easier downstream inspection.
 fn collect_chunk_visual_data(
     start_sec: f64,
     end_sec: f64,
     frame_artifacts: &[FrameArtifact],
 ) -> (Option<String>, Option<String>) {
-    let mut ocr_parts = Vec::new();
+    let mut ocr_lines: Vec<String> = Vec::new();
+    let mut seen_ocr_lines: HashSet<String> = HashSet::new();
     let mut caption_parts = Vec::new();
-    let mut seen_ocr = HashSet::new();
     let mut seen_caption = HashSet::new();
 
     for frame in frame_artifacts
@@ -871,9 +876,14 @@ fn collect_chunk_visual_data(
         .filter(|frame| frame.at_sec >= start_sec && frame.at_sec <= end_sec)
     {
         if let Some(text) = frame.ocr_text.as_deref() {
-            let normalized = text.trim();
-            if !normalized.is_empty() && seen_ocr.insert(normalized.to_string()) {
-                ocr_parts.push(normalized.to_string());
+            for line in text.lines() {
+                let normalized = normalize_ocr_line(line);
+                if !normalized.is_empty()
+                    && !is_ocr_noise_line(&normalized)
+                    && seen_ocr_lines.insert(normalized.clone())
+                {
+                    ocr_lines.push(line.trim().to_string());
+                }
             }
         }
 
@@ -885,9 +895,163 @@ fn collect_chunk_visual_data(
         }
     }
 
-    let ocr_text = (!ocr_parts.is_empty()).then(|| ocr_parts.join("\n"));
+    let ocr_text = (!ocr_lines.is_empty()).then(|| ocr_lines.join("\n"));
     let visual_caption = (!caption_parts.is_empty()).then(|| caption_parts.join(" "));
     (ocr_text, visual_caption)
+}
+
+/// Normalize an OCR line for deduplication and noise detection.
+fn normalize_ocr_line(line: &str) -> String {
+    line.split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase()
+}
+
+/// Heuristic noise detection for a single OCR line.
+fn is_ocr_noise_line(line: &str) -> bool {
+    // Too short
+    if line.chars().count() < 3 {
+        return true;
+    }
+
+    let alpha_numeric = line.chars().filter(|c| c.is_alphanumeric()).count();
+    let total = line.chars().count().max(1);
+
+    // Mostly symbols
+    if alpha_numeric * 10 < total * 3 {
+        return true;
+    }
+
+    // Too many short tokens (menu bars, toolbar dumps)
+    let words: Vec<&str> = line.split_whitespace().collect();
+    if !words.is_empty() {
+        let short_words = words.iter().filter(|w| w.chars().count() <= 2).count();
+        if short_words * 2 > words.len() {
+            return true;
+        }
+    }
+
+    // Common OS / browser UI noise (English)
+    let lower = line.to_lowercase();
+    let ui_noise = [
+        "recycle bin",
+        "trash",
+        "desktop",
+        "downloads",
+        "documents",
+        "quick access",
+        "frequent folders",
+        "recent files",
+        "one drive",
+        "this pc",
+        "3d objects",
+        "network",
+        "chrome",
+        "safari",
+        "firefox",
+        "file explorer",
+        "bookmarks",
+        "home",
+        "share",
+        "view",
+        "new tab",
+        "new window",
+    ];
+    if ui_noise.contains(&lower.as_str()) {
+        return true;
+    }
+
+    // Stand-alone single words that are almost always UI chrome
+    if lower.split_whitespace().count() == 1 {
+        let single_word_noise = [
+            "file",
+            "edit",
+            "view",
+            "help",
+            "tools",
+            "window",
+            "new",
+            "open",
+            "save",
+            "cut",
+            "copy",
+            "paste",
+            "undo",
+            "redo",
+            "print",
+            "find",
+            "replace",
+            "close",
+            "exit",
+            "back",
+            "forward",
+            "refresh",
+            "stop",
+            "search",
+            "home",
+            "zoom",
+            "fullscreen",
+            "settings",
+            "preferences",
+            "options",
+            "cancel",
+            "ok",
+            "done",
+            "apply",
+            "next",
+            "previous",
+            "first",
+            "last",
+            "add",
+            "remove",
+            "delete",
+            "rename",
+            "sort",
+        ];
+        if single_word_noise.contains(&lower.as_str()) {
+            return true;
+        }
+    }
+
+    false
+}
+
+/// Further filter OCR text for inclusion in embedding_text.
+/// Keeps only the most informative lines and limits total length.
+fn filter_ocr_for_embedding(raw_ocr: &str) -> String {
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut kept: Vec<String> = Vec::new();
+
+    for line in raw_ocr.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        // Skip short lines in embedding context
+        if trimmed.chars().count() < 5 {
+            continue;
+        }
+
+        // Re-apply noise filter for embedding (catches long toolbar dumps)
+        if is_ocr_noise_line(trimmed) {
+            continue;
+        }
+
+        let norm = normalize_ocr_line(trimmed);
+        if seen.insert(norm) {
+            kept.push(trimmed.to_string());
+        }
+    }
+
+    // Limit total lines to avoid swamping the embedding vector
+    const MAX_OCR_LINES_FOR_EMBEDDING: usize = 8;
+    if kept.len() > MAX_OCR_LINES_FOR_EMBEDDING {
+        kept.truncate(MAX_OCR_LINES_FOR_EMBEDDING);
+    }
+
+    kept.join("\n")
 }
 
 fn relocate_frames_to_chunk_dirs(
