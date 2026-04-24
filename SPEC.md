@@ -36,9 +36,9 @@
 
 ---
 
-## 3. 未決着4論点の確定仕様
+## 3. 未決着論点の確定仕様
 
-v2で保留だった4点をデフォルト値として確定。すべて `config.toml` で上書き可能にする。
+v2で保留だった4点 + 実装で追加された2点をデフォルト値として確定。すべて `config.toml` で上書き可能にする。
 
 | 論点 | 確定値(既定) | 根拠 |
 |---|---|---|
@@ -46,6 +46,52 @@ v2で保留だった4点をデフォルト値として確定。すべて `config
 | **B. 画像抽出ルール** | **定期(5秒毎) + 画面変化時追加** | 抽出コストは安く、網羅性とピーク検出を両立できる。 |
 | **C. 埋め込み対象テキスト** | **title + summary + transcript + 重要OCR** を連結して1文字列で出力(embedding は下流実施) | 下流での再構築を避けるため、`embedding_text` フィールドを事前計算して保持する。 |
 | **D. 1チャンク目標長** | **30〜90秒(上限120秒、下限15秒)** | 下限以下は結合、上限以上は再分割。 |
+| **E. 分割モード** | **`coarse_semantic`(粗分割→LLM意味分割)を既定とし、`utterance`(ASR発話境界ベース)を代替として提供** | 短い動画やLLM不使用環境では utterance モードが現実的。詳細は §3.1 参照。 |
+| **F. LLMなし動作** | **`llm.adapter = "none"` または API キー未設定時は、LLM呼び出しをすべてスキップしてtranscriptベースのフォールバック値を出力** | ローカル完結・コストゼロ運用を可能にする。詳細は §3.2 参照。 |
+
+### 3.1 utteranceモード
+
+`segment.mode = "utterance"` を指定した場合、Stage6(LLM意味分割)での LLM呼び出しをスキップし、ASR文字起こしの発話境界をそのままチャンク境界として使用する。
+
+**動作仕様:**
+
+1. ASR `TranscriptTimeline` の各 `TranscriptSegment` を基本単位とする
+2. 隣接するsegment同士の間隔が `utterance.merge_gap_sec` 以下ならマージする(0以下=マージしない、既定は `-1.0`)
+3. `utterance.min_duration_sec`(既定3秒)未満の単独utteranceは隣接utteranceと結合する
+4. **Stage7 normalize の下限は `segment.semantic.hard_min_sec` ではなく `utterance.min_duration_sec` を使用する**(utteranceモード専用の下限制約)
+5. Stage7 normalize の上限 `hard_max_sec`(既定120秒)は通常通り適用する
+6. `parent_segment_id`:
+   - CoarseSegment(Stage4)を utterance モードでも生成している場合: utteranceが属する CoarseSegmentの ID(`{video_id}_seg_{NNNN}`)
+   - CoarseSegmentを生成しない運用では: 空文字列 `""` を許容する
+7. `image_refs[].kind` は `"periodic"` / `"scene_change"` / `"utterance_start"` のいずれかを使用する。`"utterance_start"` は utterance モード専用で、各 utterance の開始時点で抽出されたフレームを示す
+8. `rationale = "utterance-boundary segmentation"` を記録する
+
+**用途:** 短い動画・LLMコストゼロ運用・意味分割の粒度より発話粒度が適切なコンテンツ(チュートリアル実況など)。
+
+**設計上の根拠:**
+
+utteranceモードでは1発話=1チャンクが自然な単位であり、`hard_min_sec=15秒` を適用すると短い発話が強制マージされて情報粒度が失われる。そのため utterance モード専用の下限 `utterance.min_duration_sec`(既定3秒)を設ける。coarse_semanticモードの `hard_min_sec` とは独立した値。
+
+### 3.2 LLMなし動作(`llm.adapter = "none"`)
+
+`llm.adapter = "none"` または対応するAPIキー環境変数が未設定の場合、以下のフォールバック動作を取る。
+
+| Stage | LLMあり(通常) | LLMなし(フォールバック) |
+|---|---|---|
+| Stage5 VLM caption(OCR/VLM統合Stage) | ClaudeVlmAdapter 等で画像説明生成 | スキップ。`visual_caption = null` |
+| Stage6 意味分割 | LLMが境界と rationale を出力 | CoarseSegment を `target_min_sec` で均等時刻分割。`rationale = "uniform-split (no-llm)"`。または `segment.mode = "utterance"` なら発話境界をそのまま使用 |
+| Stage8 注釈生成 | LLMが title / summary / keywords を生成 | transcript先頭を使ったフォールバック値を設定(下記) |
+
+**Stage8 フォールバック値の規則:**
+
+- `title`: transcript の先頭40文字。40文字で切り詰めた場合は末尾に `...` を付けて切り捨てを明示してよい(付けない実装も可)。word/文節境界は考慮しなくてよい(単純な先頭N文字取得)
+- `summary`: transcript の先頭150文字。切り詰め時の末尾 `...` は title と同様に任意
+- `keywords`: 空リスト `[]`(transcriptから単純なトークン抽出をするオプション実装も許容)
+- `processing_meta.segmentation_rationale`: `"no-llm fallback"` を記録する(segmentation とは無関係の metaフィールドだが、当面はこのフィールドで no-llm 運用を示す)
+
+**`visual_caption` と `has_visual` フラグ:**
+
+VLMなし時は `visual_caption = null` かつ `modality_flags.has_visual = false` とする。OCRが存在する場合でも `has_visual` は VLM captionの有無を示す(OCRは `has_ocr` で表現)。
 
 ---
 
@@ -100,52 +146,62 @@ pub trait Stage {
 ### Stage 0: メディア解析 (`vididx-media`)
 
 - **入力**: `mp4ファイルパス`
-- **出力**: `MediaProbe { duration_sec, video_stream, audio_stream, fps, resolution, ... }`
+- **出力**: `MediaProbe { duration_sec, video_stream, audio_stream, fps, resolution, ... }` → `probe.json`
 - **実装**: `ffprobe` をサブプロセス実行し、JSON出力をパース
 - **失敗モード**: ファイル欠損 / コーデック非対応 / 音声トラックなし
 - **受け入れ基準**:
   - 1時間以内の mp4 で duration が ±0.1秒 誤差内で取得できる
   - 音声トラックなしの動画でも(警告ログを出して)処理継続可能
 
-### Stage 1: 文字起こし (`vididx-asr`)
+### Stage 1: 音声抽出 (`vididx-media`)
 
 - **入力**: `mp4ファイルパス`, `MediaProbe`
-- **出力**: `TranscriptTimeline { segments: Vec<TranscriptSegment> }`
+- **出力**: `AudioArtifact { wav_path, sample_rate, channels }` → `audio.json`(+ `audio/audio_16k.wav`)
+- **実装**: `ffmpeg -i {mp4} -ac 1 -ar {audio_sample_rate} audio_16k.wav` を実行
+- **目的**: ASR 入力用の音声ファイルを事前に切り出してキャッシュ可能にする。以降のStageはこのwavを再利用する
+- **失敗モード**: 音声トラックなし → 空の wav ではなく `wav_path = null` を返し、Stage2以降で空 timeline として扱う
+- **受け入れ基準**:
+  - 生成された wav が指定 sample rate (既定16000Hz) / mono であること
+  - 元動画の duration と ±0.5秒 以内で一致すること
+
+### Stage 2: 文字起こし (`vididx-asr`)
+
+- **入力**: `AudioArtifact`(Stage1成果物)
+- **出力**: `TranscriptTimeline { segments: Vec<TranscriptSegment> }` → `transcript.json`
   - `TranscriptSegment { start_sec, end_sec, text, speaker?, confidence? }`
 - **実装**: `AsrAdapter` trait を差し替えられるようにする
   - 既定: `WhisperCppAdapter`(whisper.cpp をサブプロセス実行、出力JSONをパース)
   - 代替: `OpenAiWhisperAdapter`(OpenAI API), `GroqWhisperAdapter`(Groq API)
-- **コスト制御**: 音声のみ抽出→16kHz mono wav に変換してから ASR に投入
-- **失敗モード**: 無音動画 → 空の timeline を返す(エラーにしない)
+- **失敗モード**: 無音動画 / `wav_path = null` → 空の timeline を返す(エラーにしない)
 - **受け入れ基準**:
   - 30分の日本語動画で、最低1分あたり30セグメント以上の粒度が得られる
   - タイムスタンプは単調増加である
   - 各セグメントの `text` は空文字列ではない(空ならセグメントごと除外)
 
-### Stage 2: 補助信号抽出 (`vididx-media` + `vididx-vision`)
+### Stage 3: 補助信号抽出 (`vididx-media`)
 
-並列実行可能な3つのサブStage:
+並列実行可能な3つのサブStage。まとめて `aux.json` に出力する。
 
-#### 2a. 無音区間検出
+#### 3a. 無音区間検出
 
 - **入力**: `mp4ファイルパス`
 - **出力**: `Vec<SilenceInterval { start_sec, end_sec }>`
 - **実装**: `ffmpeg -af silencedetect=noise=-30dB:d=0.6` の stderr をパース
 - **既定閾値**: -30dB / 最低0.6秒
 
-#### 2b. 画面変化(scene change)検出
+#### 3b. 画面変化(scene change)検出
 
 - **入力**: `mp4ファイルパス`
 - **出力**: `Vec<SceneChange { at_sec, score }>`
 - **実装**: `ffmpeg -vf select='gt(scene,0.4)',showinfo`
 - **既定閾値**: scene スコア 0.4
 
-#### 2c. (遅延) 話者交代検出
+#### 3c. (遅延) 話者交代検出
 
 - **v3では必須実装ではなく**、`TranscriptSegment.speaker` が埋まっていれば交代点を抽出するだけのポストプロセスで良い
 - ASR が diarization 未対応の場合、このサブStageは skip される
 
-### Stage 3: 粗分割 / Coarse Segmentation (`vididx-segment`)
+### Stage 4: 粗分割 / Coarse Segmentation (`vididx-segment`)
 
 - **入力**: `MediaProbe`, `TranscriptTimeline`, `Vec<SilenceInterval>`, `Vec<SceneChange>`
 - **出力**: `Vec<CoarseSegment { index, start_sec, end_sec, transcript_text }>`
@@ -158,11 +214,48 @@ pub trait Stage {
   - すべての CoarseSegment は `end_sec > start_sec`
   - 連続する CoarseSegment は `prev.end_sec == next.start_sec`(境界は連続)
   - 動画全体をカバーする(最初の start_sec == 0、最後の end_sec == duration)
+- 出力先: `coarse.json`
 
-### Stage 4: 意味分割 / Semantic Chunking (`vididx-segment` + `vididx-llm`)
+### Stage 5: フレーム抽出・OCR・VLM (`vididx-media` + `vididx-vision`)
+
+**設計上の位置づけ:** 実装では意味分割 / normalize より先にフレーム抽出・OCR・VLM を行い、抽出結果を `frames.json` にまとめて保存する。チャンク境界が確定する前にフレームが抽出されているため、後段の normalize 後に `at_sec` ベースで各 chunk にフレームを割り当てる。
+
+- **入力**: `mp4ファイルパス`, `MediaProbe`, `Vec<SceneChange>`(Stage3成果物)
+- **出力**: `Vec<AnalyzedFrame>` → `frames.json`
+  - `AnalyzedFrame { path, at_sec, kind: "periodic" | "scene_change", analyzed: bool, ocr_text: Option<String>, visual_caption: Option<String> }`
+- **抽出ルール(既定)**:
+  - **定期抽出**: `frames.periodic_interval_sec`(既定5秒)ごとに1フレーム(`kind = "periodic"`)
+  - **画面変化抽出**: SceneChange の各 `at_sec` で1フレーム(`kind = "scene_change"`)
+  - 同じ秒数に近い(±1秒)フレームは1枚に重複排除
+- **出力形式**: jpeg(quality 85程度)。パス命名は Stage7 正規化後の chunk_id を用いる: `images/{chunk_id}/frame_{MM}.jpg`
+- **実装**: `ffmpeg -ss {t} -i {video} -frames:v 1 -q:v 3 out.jpg` をバッチ実行
+- **OCR / VLM 実施の選別**:
+  - `kind = "scene_change"` のものは常に OCR / VLM 対象(`analyzed = true`)
+  - `kind = "periodic"` のものは直前の解析対象フレームから **dHash ハミング距離 ≥ `frames.dhash_distance_threshold`(既定10)** のものだけ対象
+  - 1チャンク相当あたり最大 `frames.max_analyzed_per_chunk`(既定8)枚
+- **OCR アダプタ**: 既定 `TesseractAdapter`。`ocr_text` が空文字列でもエラーにしない
+- **VLM アダプタ**:
+  - 既定 `ClaudeVlmAdapter`(Anthropic Messages API、base64画像投入)
+  - 代替: `GeminiVlmAdapter`, `OpenAiVlmAdapter`
+  - **VLM無効化**: `vision.caption.adapter = "none"` または APIキー未設定 → VLM呼び出しを完全スキップし `visual_caption = null`
+  - VLM caption は**チャンクあたり最大 `vision.caption.max_per_chunk`(既定3)枚**(`kind = "scene_change"` を優先)
+- **VLMなし時の出力**:
+  - 全 `visual_caption = null`
+  - `modality_flags.has_visual = false`(§3.2 参照)
+  - `processing_meta.vlm_adapter = "none"`
+- **失敗モード**:
+  - OCRが空文字列 → 空で記録、エラーにしない
+  - VLM 呼び出し失敗 → リトライ3回(指数バックオフ)、全失敗なら `visual_caption = null` で続行
+
+### Stage 6: 意味分割 / Semantic Chunking (`vididx-segment` + `vididx-llm`)
 
 - **入力**: 1つの `CoarseSegment`(並列処理可能)
 - **出力**: `Vec<SemanticChunk { start_sec, end_sec, transcript_text, rationale }>`
+
+出力先: `semantic.json`
+
+#### 6a. `segment.mode = "coarse_semantic"` の場合(既定)
+
 - **アルゴリズム**:
   1. LLM に CoarseSegment の transcript(タイムスタンプ付き)を渡す
   2. 以下の指示で境界推定: 「話題転換 / 手順切替 / 質問→回答 / スライド節 / 操作フェーズ変更 を境界とせよ」
@@ -172,66 +265,58 @@ pub trait Stage {
 - **コスト制御**:
   - CoarseSegment の transcript が非常に短い(<30秒相当)場合は LLM を呼ばずそのまま1チャンクとする
   - 並列度は `config.llm.max_concurrency`(既定4)で制限
-- **失敗時フォールバック**:
-  - LLM がスキーマ違反JSONを返したら1回だけ再試行
+- **LLMなし時(`llm.adapter = "none"` または APIキー未設定)**:
+  - CoarseSegment を `target_min_sec`(既定30秒)で均等時刻分割する
+  - `rationale = "uniform-split (no-llm)"` を記録する
+  - 警告ログを出力する(エラーにしない)
+- **LLM呼び出し失敗時フォールバック**:
+  - スキーマ違反JSONを返したら1回だけ再試行
   - 再試行も失敗したら、CoarseSegment を目標長で均等分割して警告ログを出す
 
-### Stage 5: 後処理(結合・再分割) (`vididx-segment`)
+#### 6b. `segment.mode = "utterance"` の場合
 
-- **入力**: `Vec<SemanticChunk>`(全 CoarseSegment 分を連結したもの)
-- **出力**: `Vec<NormalizedChunk>`
+- LLM呼び出しはスキップする
+- ASR `TranscriptTimeline` の各 `TranscriptSegment` を `SemanticChunk` として扱う
+- `utterance.merge_gap_sec` 以内の隣接utteranceをマージしてから Stage7 に渡す(既定 `-1.0` = マージしない)
+- `utterance.min_duration_sec`(既定3秒)未満のutteranceは隣接と結合する
+- `rationale = "utterance-boundary segmentation"` を記録する
+- CoarseSegmentは Stage4 で生成済みだが、`parent_segment_id` への反映は運用選択とする(§3.1 参照)
+
+### Stage 7: 後処理(結合・再分割) (`vididx-segment`)
+
+- **入力**: `Vec<SemanticChunk>`(Stage6成果物)
+- **出力**: `Vec<NormalizedChunk>` → `normalized.json`
 - **ルール**:
-  1. 15秒未満のチャンクは隣接チャンクと結合(短い方から処理)
-  2. 120秒超のチャンクは 30〜90秒目標で時刻等分で再分割
+  1. **下限マージ**:
+     - `coarse_semantic` モード: `hard_min_sec`(既定15秒)未満のチャンクは隣接チャンクと結合
+     - `utterance` モード: `utterance.min_duration_sec`(既定3秒)未満のチャンクは隣接チャンクと結合
+  2. **上限再分割**: `hard_max_sec`(既定120秒)超のチャンクは `target_min_sec`〜`target_max_sec` 目標で時刻等分で再分割
   3. 結合/分割時は transcript_text も整合するように再構築
   4. 最終的にすべてのチャンクに連番 `chunk_id` を付与: `{video_id}_chunk_{NNNN}`
-
-### Stage 6: 画像抽出・選別 (`vididx-media`)
-
-- **入力**: `MediaProbe`, `Vec<SceneChange>`, `Vec<NormalizedChunk>`
-- **出力**: `Vec<ExtractedFrame { path, at_sec, kind: Periodic|SceneChange, chunk_id }>`
-- **抽出ルール(既定)**:
-  - **定期抽出**: 5秒ごとに1フレーム(`Periodic`)
-  - **画面変化抽出**: SceneChange の各 `at_sec` で1フレーム(`SceneChange`)
-  - どちらの条件でも同一チャンク内で同じ秒数に近い(±1秒)フレームは1枚に重複排除
-- **出力形式**: jpeg(quality=85)、`images/{video_id}/chunk_{NNNN}/frame_{MM}.jpg`
-- **実装**: `ffmpeg -ss {t} -i {video} -frames:v 1 -q:v 3 out.jpg` をチャンクごとにバッチ実行
-- **選別(OCR/caption対象の決定)**:
-  - `kind=SceneChange` のものは常に OCR/caption 対象
-  - `kind=Periodic` のものは、直前の OCR/caption 対象から **dHash 距離が閾値以上**のものだけ対象にする(類似フレームの重複解析を避ける)
-  - 既定の dHash ハミング距離閾値: 10
-  - 解析対象フレームは1チャンクあたり最大8枚(超過分は等間隔で間引き)
-
-### Stage 7: OCR / Visual Caption (`vididx-vision`)
-
-- **入力**: Stage6 で「解析対象」とマークされたフレーム群
-- **出力**: `FrameAnalysis { frame_path, ocr_text?, visual_caption? }`
-- **アダプタ**:
-  - OCR: 既定 `TesseractAdapter`(tesseract を `tesseract image.jpg - -l jpn+eng` でサブプロセス実行)
-  - Visual Caption: 既定 `ClaudeVlmAdapter`(Anthropic Messages API に画像を base64 で投入)
-  - 代替: `GeminiVlmAdapter`, `OpenAiVlmAdapter`
-- **コスト制御**:
-  - OCR は全対象フレームに実施(ローカルなので安い)
-  - VLM caption は**チャンクあたり最大3枚**に制限(kind=SceneChange を優先)
-- **失敗モード**:
-  - OCRが空文字列 → そのまま空で記録、エラーにしない
-  - VLM 呼び出し失敗 → リトライ3回(指数バックオフ)、全失敗なら `visual_caption=null` で続行
+  5. Stage5 で抽出したフレームを `at_sec` ベースで各 chunk に割り当てる
 
 ### Stage 8: チャンク注釈生成 (`vididx-llm`)
 
-- **入力**: `NormalizedChunk` + そのチャンクに紐づく `FrameAnalysis[]`
-- **出力**: `AnnotatedChunk`(title, summary, keywords を付与)
+- **入力**: `NormalizedChunk` + そのチャンクに紐づく `AnalyzedFrame[]`
+- **出力**: `AnnotatedChunk`(title, summary, keywords を付与) → `annotated.json`
+
+#### 8a. LLMあり時(通常動作)
+
 - **LLM 1回の呼び出しで title / summary / keywords をまとめて生成**(プロンプト外部化)
-  - title: 40文字以内の日本語
+  - title: 40文字以内。コンテンツ言語と一致させる(日本語動画なら日本語、英語動画なら英語)
   - summary: 2〜4文、150文字程度
   - keywords: 3〜7個、名詞句
 - **並列度**: `config.llm.max_concurrency`(既定4)
-- **失敗時**:
-  - スキーマ違反 → 1回リトライ → 失敗なら transcript の先頭40文字を title、先頭150文字を summary に fallback
+- **LLM呼び出し失敗時**:
+  - スキーマ違反 → 1回リトライ → 失敗なら §3.2 のフォールバック値を使用
+
+#### 8b. LLMなし時(`llm.adapter = "none"` または APIキー未設定)
+
+§3.2 の規則に従ってフォールバック値を設定する。LLM呼び出しは一切行わない。詳細は §3.2「Stage8 フォールバック値の規則」を参照。
 
 ### Stage 9: 出力 (`vididx-output`)
 
-- **入力**: `Vec<AnnotatedChunk>` + `FrameAnalysis[]`
+- **入力**: `Vec<AnnotatedChunk>` + `AnalyzedFrame[]`
 - **出力**:
   1. `{video_id}.chunks.jsonl` — 1行1チャンクのJSONL(retrieval-ready)
   2. `{video_id}.index.json` — manifest + メタデータ
@@ -305,6 +390,8 @@ pub struct Chunk {
     pub source_path: String,
     pub source_hash: String,          // "sha256:..."
     pub chunk_id: String,
+    /// CoarseSegmentのID(`{video_id}_seg_{NNNN}`)。
+    /// utteranceモードで coarse 紐付けを省略する場合は空文字列 `""` を許容する。
     pub parent_segment_id: String,
     pub start_sec: f64,
     pub end_sec: f64,
@@ -337,8 +424,12 @@ pub struct ImageRef {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FrameKind {
+    /// 定期抽出(`frames.periodic_interval_sec` ごと)
     Periodic,
+    /// scene change 検出点で抽出
     SceneChange,
+    /// utterance モード専用: 各 utterance の開始時点で抽出
+    UtteranceStart,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -363,13 +454,13 @@ pub struct ModalityFlags {
   "config_hash": "sha256:...",
   "stages": {
     "stage0_probe":      {"status": "done", "input_hash": "...", "output_path": ".../probe.json",      "completed_at": "..."},
-    "stage1_asr":        {"status": "done", "input_hash": "...", "output_path": ".../transcript.json", "completed_at": "..."},
-    "stage2_aux":        {"status": "done", "input_hash": "...", "output_path": ".../aux.json",        "completed_at": "..."},
-    "stage3_coarse":     {"status": "done", "input_hash": "...", "output_path": ".../coarse.json",     "completed_at": "..."},
-    "stage4_semantic":   {"status": "done", "input_hash": "...", "output_path": ".../semantic.json",   "completed_at": "..."},
-    "stage5_normalize":  {"status": "done", "input_hash": "...", "output_path": ".../normalized.json", "completed_at": "..."},
-    "stage6_frames":     {"status": "done", "input_hash": "...", "output_path": ".../frames.json",     "completed_at": "..."},
-    "stage7_vision":     {"status": "done", "input_hash": "...", "output_path": ".../vision.json",     "completed_at": "..."},
+    "stage1_audio":      {"status": "done", "input_hash": "...", "output_path": ".../audio.json",      "completed_at": "..."},
+    "stage2_asr":        {"status": "done", "input_hash": "...", "output_path": ".../transcript.json", "completed_at": "..."},
+    "stage3_aux":        {"status": "done", "input_hash": "...", "output_path": ".../aux.json",        "completed_at": "..."},
+    "stage4_coarse":     {"status": "done", "input_hash": "...", "output_path": ".../coarse.json",     "completed_at": "..."},
+    "stage5_frames":     {"status": "done", "input_hash": "...", "output_path": ".../frames.json",     "completed_at": "..."},
+    "stage6_semantic":   {"status": "done", "input_hash": "...", "output_path": ".../semantic.json",   "completed_at": "..."},
+    "stage7_normalize":  {"status": "done", "input_hash": "...", "output_path": ".../normalized.json", "completed_at": "..."},
     "stage8_annotate":   {"status": "done", "input_hash": "...", "output_path": ".../annotated.json",  "completed_at": "..."},
     "stage9_output":     {"status": "done", "input_hash": "...", "output_path": ".../chunks.jsonl",    "completed_at": "..."}
   }
@@ -397,7 +488,7 @@ COMMANDS:
   process <VIDEO>        mp4を処理してチャンクJSONL+Markdownを生成
     --video-id <ID>      明示的なvideo_id(既定: ファイル名から自動生成)
     --from <STAGE>       指定Stageから再開(既定: 未完了の最初のStage)
-    --to <STAGE>         指定Stageで停止(既定: stage9)
+    --to <STAGE>         指定Stageで停止(既定: stage9_output)
     --force              キャッシュ無視で全再実行
     --dry-run            コスト見積りのみ(LLM呼び出しなし)
 
@@ -407,15 +498,27 @@ COMMANDS:
 
 EXAMPLES:
   vididx process ./sample.mp4
-  vididx process ./sample.mp4 --from stage4_semantic --force
-  vididx process ./sample.mp4 --to stage3_coarse        # 粗分割までで停止
+  vididx process ./sample.mp4 --from stage6_semantic --force
+  vididx process ./sample.mp4 --to stage4_coarse        # 粗分割までで停止
   vididx estimate ./sample.mp4
 ```
 
 ### 7.1 Stage名の正規化
 
 CLI引数で使う Stage 識別子は manifest の key と同じ:
-`stage0_probe, stage1_asr, stage2_aux, stage3_coarse, stage4_semantic, stage5_normalize, stage6_frames, stage7_vision, stage8_annotate, stage9_output`
+
+| Stage | 識別子 | 成果物 |
+|---|---|---|
+| 0 | `stage0_probe` | `probe.json` |
+| 1 | `stage1_audio` | `audio.json` + `audio/audio_16k.wav` |
+| 2 | `stage2_asr` | `transcript.json` |
+| 3 | `stage3_aux` | `aux.json` |
+| 4 | `stage4_coarse` | `coarse.json` |
+| 5 | `stage5_frames` | `frames.json` + `images/` |
+| 6 | `stage6_semantic` | `semantic.json` |
+| 7 | `stage7_normalize` | `normalized.json` |
+| 8 | `stage8_annotate` | `annotated.json` |
+| 9 | `stage9_output` | `{video_id}.chunks.jsonl`, `{video_id}.index.json`, `{video_id}.md` |
 
 ---
 
@@ -432,15 +535,23 @@ ffmpeg_path = "ffmpeg"
 ffprobe_path = "ffprobe"
 audio_sample_rate = 16000
 
+[segment]
+mode = "coarse_semantic"      # coarse_semantic | utterance (論点E)
+
 [segment.coarse]
 max_duration_sec = 300        # 論点A
 snap_window_sec = 30          # 補助信号へのスナップ許容範囲
 
+[segment.utterance]
+# utteranceモード専用設定。mode = "utterance" のときのみ有効
+merge_gap_sec = -1.0          # この秒数以下の隣接utterance間隔をマージ。負値=マージしない(既定)
+min_duration_sec = 3.0        # Stage7 normalize で utteranceモード時に使う下限値
+
 [segment.semantic]
 target_min_sec = 30           # 論点D
 target_max_sec = 90           # 論点D
-hard_min_sec = 15
-hard_max_sec = 120
+hard_min_sec = 15             # Stage7 normalize で coarse_semanticモード時に使う下限値
+hard_max_sec = 120            # 両モード共通の上限値
 
 [frames]
 periodic_interval_sec = 5     # 論点B
@@ -463,12 +574,12 @@ adapter = "tesseract"
 languages = ["jpn", "eng"]
 
 [vision.caption]
-adapter = "claude"
+adapter = "claude"            # claude | gemini | openai | none (論点F: "none" でVLM完全無効化)
 model = "claude-sonnet-4-6"
 max_per_chunk = 3
 
 [llm]
-adapter = "claude"
+adapter = "claude"            # claude | openai | none (論点F: "none" でLLM完全無効化)
 model = "claude-sonnet-4-6"
 max_concurrency = 4
 retry_max = 3
@@ -662,10 +773,12 @@ pub enum VididxError {
 
 1. **E2E 成功**: サンプル10分動画(fixtures に同梱)を `vididx process` で処理し、chunks.jsonl / index.json / Markdown の3ファイルが生成される
 2. **スキーマ検証**: 生成された全 JSONL 行が `vididx validate` で pass
-3. **チャンク粒度**: 全チャンクが `hard_min_sec(15) <= duration <= hard_max_sec(120)` の範囲内
+3. **チャンク粒度**: 全チャンクが以下の範囲内
+   - `coarse_semantic` モード: `hard_min_sec(15) <= duration <= hard_max_sec(120)`
+   - `utterance` モード: `utterance.min_duration_sec(3) <= duration <= hard_max_sec(120)`
 4. **時刻整合性**: 全チャンクで `start_sec < end_sec`、連続する2チャンクで重複なし(隣接チャンクはgapゼロを強制しない)
 5. **キャッシュ**: 2回目の `vididx process` は全Stageがキャッシュヒットして LLM API を呼び出さない(`--dry-run` で確認可能)
-6. **部分再実行**: `--from stage4_semantic` で Stage4 以降のみが実行される
+6. **部分再実行**: `--from stage6_semantic` で Stage6 以降のみが実行される
 7. **fail-soft**: 意図的に API キーを無効化した状態でも、caption/summary が null/fallback で埋まるだけで全体は完走する
 8. **Markdown 可読性**: 生成 Markdown には時刻アンカー / 画像参照 / summary がすべて含まれる
 
@@ -817,5 +930,7 @@ Claude Code に投げるときの定型(タスクごとにコピペ想定):
 
 - v1: 初期案(秒数ベース分割前提)
 - v2: 階層的意味分割に方針転換、4論点を保留
-- **v3 (本版)**: 4論点を既定値で確定、Rust workspace 構造・Stage trait・受け入れ基準・タスク分割を追加(実装投入版)
+- **v3**: 4論点を既定値で確定、Rust workspace 構造・Stage trait・受け入れ基準・タスク分割を追加(実装投入版)
+- v3.1: utteranceモード(論点E)・LLMなし動作(論点F)を追加
+- **v3.2 (本版)**: 実装に合わせてStage構成を再編成(音声抽出をStage1化、フレーム+OCR+VLMをStage5に統合)。utteranceモードの normalize 下限を `utterance.min_duration_sec` に分離。`parent_segment_id` 空文字列許容を明記
 

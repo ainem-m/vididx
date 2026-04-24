@@ -50,9 +50,10 @@ impl Default for MediaConfig {
 pub enum SegmentMode {
     /// Use ASR utterance boundaries directly as chunk boundaries.
     Utterance,
-    /// LLM-guided or heuristic semantic chunking within coarse segments (default).
+    /// Coarse segmentation followed by LLM (or heuristic) semantic chunking (default).
     #[default]
-    Semantic,
+    #[serde(alias = "semantic")]
+    CoarseSemantic,
     /// Coarse segmentation only; skip semantic splitting.
     Chapter,
 }
@@ -574,9 +575,9 @@ max_duration_sec = 600.0
     }
 
     #[test]
-    fn test_segment_mode_default_is_semantic() {
+    fn test_segment_mode_default_is_coarse_semantic() {
         let cfg = Config::default();
-        assert_eq!(cfg.segment.mode, SegmentMode::Semantic);
+        assert_eq!(cfg.segment.mode, SegmentMode::CoarseSemantic);
     }
 
     #[test]
@@ -596,6 +597,15 @@ min_duration_sec = 5.0
         assert_eq!(cfg.segment.mode, SegmentMode::Utterance);
         assert_eq!(cfg.segment.utterance.merge_gap_sec, 1.0);
         assert_eq!(cfg.segment.utterance.min_duration_sec, 5.0);
+    }
+
+    #[test]
+    fn test_segment_mode_parses_legacy_semantic_alias_from_toml() {
+        let temp_dir = TempDir::new().unwrap();
+        let config_path = temp_dir.path().join("vididx.toml");
+        fs::write(&config_path, "[segment]\nmode = \"semantic\"\n").unwrap();
+        let cfg = Config::load(Some(&config_path)).unwrap();
+        assert_eq!(cfg.segment.mode, SegmentMode::CoarseSemantic);
     }
 
     #[test]

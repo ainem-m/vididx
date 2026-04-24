@@ -47,7 +47,9 @@ fn merge_short_chunks(chunks: Vec<SemanticChunk>, hard_min: f64) -> Vec<Semantic
             }
         }
 
-        let Some(idx) = shortest_idx else { break; };
+        let Some(idx) = shortest_idx else {
+            break;
+        };
 
         // Determine which neighbor is shorter
         let left_dur = if idx > 0 {
@@ -71,7 +73,8 @@ fn merge_short_chunks(chunks: Vec<SemanticChunk>, hard_min: f64) -> Vec<Semantic
             result[idx - 1].end_sec = result[idx].end_sec;
             result[idx - 1].transcript_text = format!(
                 "{} {}",
-                result[idx - 1].transcript_text, result[idx].transcript_text
+                result[idx - 1].transcript_text,
+                result[idx].transcript_text
             )
             .trim()
             .to_string();
@@ -83,7 +86,8 @@ fn merge_short_chunks(chunks: Vec<SemanticChunk>, hard_min: f64) -> Vec<Semantic
             result[idx].end_sec = result[idx + 1].end_sec;
             result[idx].transcript_text = format!(
                 "{} {}",
-                result[idx].transcript_text, result[idx + 1].transcript_text
+                result[idx].transcript_text,
+                result[idx + 1].transcript_text
             )
             .trim()
             .to_string();
@@ -147,6 +151,7 @@ fn assign_chunk_ids(chunks: Vec<SemanticChunk>, video_id: &str) -> Vec<Normalize
             start_sec: chunk.start_sec,
             end_sec: chunk.end_sec,
             transcript_text: chunk.transcript_text,
+            rationale: chunk.rationale,
         })
         .collect()
 }

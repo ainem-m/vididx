@@ -32,6 +32,7 @@ pub fn utterance_to_chunks(
             start_sec,
             end_sec,
             transcript_text: text,
+            rationale: "utterance-boundary segmentation".to_string(),
         })
         .collect()
 }

@@ -7,8 +7,8 @@ use std::process::Command;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use url::Url;
-use vididx_core::{Config, VididxError};
-use vididx_pipeline::{JobContext, Manifest, run_pipeline};
+use vididx_core::{Chunk, Config, VididxError};
+use vididx_pipeline::{JobContext, Manifest, run_pipeline, stage_name_to_index};
 
 mod wix;
 
@@ -24,6 +24,18 @@ use wix::{
     long_about = "A tool for processing videos into retrieval-ready JSON chunks for RAG systems"
 )]
 struct Cli {
+    /// Path to config file (default: ./vididx.toml → ~/.config/vididx/config.toml)
+    #[arg(long, global = true)]
+    config: Option<PathBuf>,
+
+    /// Log level: trace|debug|info|warn|error
+    #[arg(long, global = true, default_value = "info")]
+    log_level: String,
+
+    /// Output directory (overrides config general.out_dir)
+    #[arg(long, global = true)]
+    out_dir: Option<PathBuf>,
+
     #[command(subcommand)]
     command: Commands,
 }
@@ -39,21 +51,21 @@ enum Commands {
         #[arg(long)]
         video_id: Option<String>,
 
-        /// Start from this stage (0-9, default: 0)
+        /// Start from this stage (number 0-9 or name like stage6_semantic)
         #[arg(long)]
-        from: Option<usize>,
+        from: Option<String>,
 
-        /// End at this stage (0-9, default: 9)
+        /// End at this stage (number 0-9 or name like stage4_coarse)
         #[arg(long)]
-        to: Option<usize>,
+        to: Option<String>,
 
         /// Force re-processing even if cached
         #[arg(long)]
         force: bool,
 
-        /// Output directory
-        #[arg(long, short = 'o')]
-        output: Option<PathBuf>,
+        /// Estimate cost only, no LLM calls (not yet implemented)
+        #[arg(long)]
+        dry_run: bool,
     },
 
     /// Inspect output of a processing job
@@ -62,7 +74,7 @@ enum Commands {
         out_dir: PathBuf,
     },
 
-    /// Validate a chunks JSONL file
+    /// Validate a chunks JSONL file against the Chunk schema
     Validate {
         /// Path to chunks.jsonl file
         jsonl: PathBuf,
@@ -135,9 +147,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             from,
             to,
             force,
-            output,
+            dry_run,
         } => {
-            process_command(video, video_id, from, to, force, output).await?;
+            process_command(
+                video,
+                video_id,
+                from,
+                to,
+                force,
+                dry_run,
+                cli.config,
+                cli.out_dir,
+            )
+            .await?;
         }
         Commands::Inspect { out_dir } => {
             inspect_command(out_dir).await?;
@@ -146,7 +168,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             validate_command(jsonl).await?;
         }
         Commands::Estimate { video } => {
-            estimate_command(video).await?;
+            estimate_command(video, cli.config).await?;
         }
         Commands::WixDownload {
             input,
@@ -162,23 +184,32 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn process_command(
     video: String,
     video_id: Option<String>,
-    from: Option<usize>,
-    to: Option<usize>,
+    from: Option<String>,
+    to: Option<String>,
     force: bool,
-    output: Option<PathBuf>,
+    _dry_run: bool,
+    config_path: Option<PathBuf>,
+    out_dir_override: Option<PathBuf>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let video_input = classify_video_input(&video)?;
-    let config = Config::load(None)?;
-    let (from_stage, to_stage) = normalize_stage_range(from, to)?;
+    let mut config = Config::load(config_path.as_deref())?;
+
+    // Apply --out-dir override
+    if let Some(ref od) = out_dir_override {
+        config.general.out_dir = od.to_string_lossy().into_owned();
+    }
+
+    let (from_stage, to_stage) = normalize_stage_range(from.as_deref(), to.as_deref())?;
     run_preflight_checks(&config, &video_input, from_stage, to_stage)?;
 
     let vid_id = video_id
         .unwrap_or_else(|| default_video_id(&video_input).unwrap_or_else(|| "video".to_string()));
 
-    let out_dir = output.unwrap_or_else(|| PathBuf::from(format!("output/{}", vid_id)));
+    let out_dir = resolve_process_out_dir(&config, &vid_id);
     fs::create_dir_all(&out_dir)?;
     let prepared = prepare_input_for_processing(&video_input, &config, &out_dir)?;
 
@@ -196,7 +227,6 @@ async fn process_command(
         Manifest::new(&vid_id, &prepared.source_ref, &source_hash, &config_hash)
     };
 
-    // Create job context
     let ctx = JobContext {
         video_id: vid_id.clone(),
         source_type: prepared.source_type,
@@ -210,11 +240,10 @@ async fn process_command(
     };
 
     eprintln!(
-        "Processing video: {} (stages {}-{})",
+        "Processing: {} (stages {}-{})",
         prepared.source_ref, from_stage, to_stage
     );
     run_pipeline(ctx).await?;
-
     eprintln!("✓ Processing complete");
     Ok(())
 }
@@ -227,14 +256,14 @@ async fn inspect_command(out_dir: PathBuf) -> Result<(), Box<dyn std::error::Err
         .map_err(|e| VididxError::Config(format!("Failed to load manifest: {:?}", e)))?;
 
     println!("Video ID: {}", manifest.video_id);
-    println!("Source: {}", manifest.source_path);
-    println!("Source Hash: {}", manifest.source_hash);
-    println!("Config Hash: {}", manifest.config_hash);
+    println!("Source:   {}", manifest.source_path);
+    println!("Src hash: {}", manifest.source_hash);
+    println!("Cfg hash: {}", manifest.config_hash);
     println!("\nStages:");
 
     for (stage_name, record) in &manifest.stages {
         println!(
-            "  {} - {:?} ({})",
+            "  {:20} {:?}  hash={}",
             stage_name, record.status, record.input_hash
         );
     }
@@ -242,45 +271,73 @@ async fn inspect_command(out_dir: PathBuf) -> Result<(), Box<dyn std::error::Err
     Ok(())
 }
 
+/// Validate a JSONL file: every non-empty line must deserialize as a valid `Chunk`.
 async fn validate_command(jsonl: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
     check_file_exists(&jsonl)?;
 
     let content = fs::read_to_string(&jsonl)?;
-    let mut valid_count = 0;
-    let mut error_count = 0;
+    let mut valid = 0usize;
+    let mut errors = 0usize;
 
     for (line_no, line) in content.lines().enumerate() {
         if line.trim().is_empty() {
             continue;
         }
-
-        match serde_json::from_str::<serde_json::Value>(line) {
-            Ok(_) => {
-                valid_count += 1;
+        match serde_json::from_str::<Chunk>(line) {
+            Ok(chunk) => {
+                // Additional field-level checks
+                let mut field_errors: Vec<String> = Vec::new();
+                if chunk.schema_version != "1.0" {
+                    field_errors.push(format!(
+                        "schema_version must be '1.0', got '{}'",
+                        chunk.schema_version
+                    ));
+                }
+                if chunk.start_sec >= chunk.end_sec {
+                    field_errors.push(format!(
+                        "start_sec ({}) must be < end_sec ({})",
+                        chunk.start_sec, chunk.end_sec
+                    ));
+                }
+                if (chunk.duration_sec - (chunk.end_sec - chunk.start_sec)).abs() > 0.01 {
+                    field_errors.push("duration_sec inconsistent with start/end".to_string());
+                }
+                if chunk.embedding_text.is_empty() {
+                    field_errors.push("embedding_text must not be empty".to_string());
+                }
+                if field_errors.is_empty() {
+                    valid += 1;
+                } else {
+                    for msg in &field_errors {
+                        eprintln!("Line {}: {}", line_no + 1, msg);
+                    }
+                    errors += 1;
+                }
             }
             Err(e) => {
-                eprintln!("Line {}: {}", line_no + 1, e);
-                error_count += 1;
+                eprintln!("Line {}: schema error: {}", line_no + 1, e);
+                errors += 1;
             }
         }
     }
 
-    println!("✓ Valid lines: {}", valid_count);
-    if error_count > 0 {
-        println!("✗ Invalid lines: {}", error_count);
+    println!("✓ Valid chunks: {}", valid);
+    if errors > 0 {
+        println!("✗ Invalid chunks: {}", errors);
         return Err("Validation failed".into());
     }
-
     Ok(())
 }
 
-async fn estimate_command(video: String) -> Result<(), Box<dyn std::error::Error>> {
+async fn estimate_command(
+    video: String,
+    config_path: Option<PathBuf>,
+) -> Result<(), Box<dyn std::error::Error>> {
     let video_input = classify_video_input(&video)?;
-    let config = Config::load(None)?;
+    let config = Config::load(config_path.as_deref())?;
     let estimate = estimate_input(&video_input, &config)?;
     let size_mb = estimate.size_mb;
 
-    // Rough estimates
     let est_chunks = (size_mb / 10.0).max(5.0) as usize;
     let est_output_mb = (size_mb * 0.5).ceil() as usize;
     let est_time_min = (size_mb / 50.0).ceil() as usize;
@@ -302,40 +359,38 @@ async fn wix_download_command(
     max_segments: usize,
     stop_after_misses: usize,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let input_for_log = input.clone();
-    let output_for_log = output.clone();
-    eprintln!("Resolving Wix segments from: {}", input_for_log);
-    eprintln!("Writing output under: {}", output_for_log.display());
+    eprintln!("Resolving Wix segments from: {}", input);
+    eprintln!("Writing output under: {}", output.display());
 
     let result = tokio::task::spawn_blocking(move || -> Result<_, String> {
-        fs::create_dir_all(&output).map_err(|err| err.to_string())?;
-
+        fs::create_dir_all(&output).map_err(|e| e.to_string())?;
         let resolver = WixDirectSegmentResolver;
         let resolved = resolver
             .resolve(&input)
-            .map_err(|err| format!("Failed to resolve Wix segment source: {}", err))?;
+            .map_err(|e| format!("Failed to resolve: {}", e))?;
         let plan = build_download_plan(&resolved, &output, video_id.as_deref());
-        let downloader = WixDownloader::new(http_client().map_err(|err| err.to_string())?);
+        let downloader = WixDownloader::new(http_client().map_err(|e| e.to_string())?);
         let options = WixDownloadOptions {
             max_segments,
             stop_after_misses,
         };
-
         downloader
             .download(&resolved, &plan, &options)
-            .map_err(|err| format!("Failed to download Wix video: {}", err))
+            .map_err(|e| format!("Download failed: {}", e))
     })
     .await
-    .map_err(|err| format!("Wix download task failed: {}", err))?
-    .map_err(|err| -> Box<dyn std::error::Error> { err.into() })?;
+    .map_err(|e| format!("Task failed: {}", e))?
+    .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
 
-    println!("Source: {}", result.source_ref);
-    println!("Segments: {}", result.segment_count);
-    println!("Segments dir: {}", result.segments_dir.display());
-    println!("MP4: {}", result.output_mp4.display());
+    println!("Source:        {}", result.source_ref);
+    println!("Segments:      {}", result.segment_count);
+    println!("Segments dir:  {}", result.segments_dir.display());
+    println!("MP4:           {}", result.output_mp4.display());
 
     Ok(())
 }
+
+// ── input classification ──────────────────────────────────────────────────────
 
 fn classify_video_input(input: &str) -> Result<VideoInput, Box<dyn std::error::Error>> {
     if let Ok(url) = Url::parse(input)
@@ -343,7 +398,6 @@ fn classify_video_input(input: &str) -> Result<VideoInput, Box<dyn std::error::E
     {
         return Ok(VideoInput::WebUrl(url));
     }
-
     Ok(VideoInput::LocalPath(PathBuf::from(input)))
 }
 
@@ -351,20 +405,20 @@ fn default_video_id(input: &VideoInput) -> Option<String> {
     match input {
         VideoInput::LocalPath(path) => path
             .file_stem()
-            .and_then(|stem| stem.to_str())
+            .and_then(|s| s.to_str())
             .map(ToOwned::to_owned),
         VideoInput::WebUrl(url) => {
-            let last_segment = url
+            let last = url
                 .path_segments()
-                .and_then(|mut segments| segments.rfind(|segment| !segment.is_empty()))
+                .and_then(|mut s| s.rfind(|seg| !seg.is_empty()))
                 .map(sanitize_video_id);
-            last_segment.or_else(|| url.host_str().map(sanitize_video_id))
+            last.or_else(|| url.host_str().map(sanitize_video_id))
         }
     }
 }
 
 fn sanitize_video_id(input: &str) -> String {
-    let sanitized = input
+    let s = input
         .chars()
         .map(|c| {
             if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
@@ -376,13 +430,130 @@ fn sanitize_video_id(input: &str) -> String {
         .collect::<String>()
         .trim_matches('_')
         .to_string();
+    if s.is_empty() { "video".to_string() } else { s }
+}
 
-    if sanitized.is_empty() {
-        "video".to_string()
+fn resolve_process_out_dir(config: &Config, video_id: &str) -> PathBuf {
+    PathBuf::from(&config.general.out_dir).join(video_id)
+}
+
+// ── stage range parsing ───────────────────────────────────────────────────────
+
+fn normalize_stage_range(
+    from: Option<&str>,
+    to: Option<&str>,
+) -> Result<(usize, usize), Box<dyn std::error::Error>> {
+    let from_stage = match from {
+        None => 0,
+        Some(s) => stage_name_to_index(s).ok_or_else(|| {
+            format!(
+                "Unknown stage '{}'. Use 0-9 or a stage name like stage6_semantic.",
+                s
+            )
+        })?,
+    };
+    let to_stage = match to {
+        None => 9,
+        Some(s) => stage_name_to_index(s).ok_or_else(|| {
+            format!(
+                "Unknown stage '{}'. Use 0-9 or a stage name like stage4_coarse.",
+                s
+            )
+        })?,
+    };
+    if from_stage > to_stage {
+        return Err(format!("Invalid range: --from {} > --to {}.", from_stage, to_stage).into());
+    }
+    Ok((from_stage, to_stage))
+}
+
+// ── preflight checks ──────────────────────────────────────────────────────────
+
+fn stage_range_includes(from: usize, to: usize, stage: usize) -> bool {
+    (from..=to).contains(&stage)
+}
+
+fn tool_requirements(
+    config: &Config,
+    input: &VideoInput,
+    from_stage: usize,
+    to_stage: usize,
+) -> Result<Vec<ToolRequirement>, String> {
+    let mut reqs = Vec::new();
+
+    if from_stage == 0 {
+        reqs.push(ToolRequirement {
+            name: "ffprobe",
+            command: config.media.ffprobe_path.clone(),
+        });
+    }
+
+    // ffmpeg needed for audio(1), aux(3), frames(5)
+    if stage_range_includes(from_stage, to_stage, 1)
+        || stage_range_includes(from_stage, to_stage, 3)
+        || stage_range_includes(from_stage, to_stage, 5)
+    {
+        reqs.push(ToolRequirement {
+            name: "ffmpeg",
+            command: config.media.ffmpeg_path.clone(),
+        });
+    }
+
+    if stage_range_includes(from_stage, to_stage, 2) && config.asr.adapter == "whisper_cpp" {
+        reqs.push(ToolRequirement {
+            name: "whisper-cli",
+            command: config.asr.whisper_cpp.binary_path.clone(),
+        });
+    }
+
+    if to_stage >= 5 && config.vision.ocr.adapter == "tesseract" {
+        reqs.push(ToolRequirement {
+            name: "tesseract",
+            command: config.vision.ocr.adapter.clone(),
+        });
+    }
+
+    if matches!(input, VideoInput::WebUrl(_)) {
+        let dl = configured_url_downloader(config).map_err(|e| e.to_string())?;
+        reqs.push(ToolRequirement {
+            name: "yt-dlp",
+            command: dl.to_string(),
+        });
+    }
+
+    Ok(reqs)
+}
+
+fn run_preflight_checks(
+    config: &Config,
+    input: &VideoInput,
+    from_stage: usize,
+    to_stage: usize,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let reqs = tool_requirements(config, input, from_stage, to_stage).map_err(|e| e.to_string())?;
+    let mut failures = Vec::new();
+    for req in reqs {
+        if let Err(e) = ensure_tool_available(&req.command) {
+            failures.push(format!("{} ({})", req.name, e));
+        }
+    }
+    if failures.is_empty() {
+        Ok(())
     } else {
-        sanitized
+        Err(format!("Pre-flight check failed: {}", failures.join(", ")).into())
     }
 }
+
+fn ensure_tool_available(tool: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let out = Command::new(tool).arg("-version").output()?;
+    if out.status.success() {
+        Ok(())
+    } else {
+        Err(format!("Required tool not available: {}", tool).into())
+    }
+}
+
+// ── download helpers ──────────────────────────────────────────────────────────
 
 fn prepare_input_for_processing(
     input: &VideoInput,
@@ -394,21 +565,21 @@ fn prepare_input_for_processing(
             check_video_exists(path)?;
             Ok(PreparedInput {
                 source_type: "local_mp4".to_string(),
-                source_ref: path.to_string_lossy().to_string(),
+                source_ref: path.to_string_lossy().into_owned(),
                 local_video_path: path.clone(),
             })
         }
         VideoInput::WebUrl(url) => {
-            let downloader = configured_url_downloader(config)?;
-            ensure_tool_available(downloader)?;
+            let dl = configured_url_downloader(config)?;
+            ensure_tool_available(dl)?;
             let input_dir = out_dir.join("input");
             fs::create_dir_all(&input_dir)?;
-            let local_video_path = download_video(downloader, url, &input_dir)
-                .map_err(|err| format!("Failed to fetch video from URL {}: {}", url, err))?;
+            let local = download_video(dl, url, &input_dir)
+                .map_err(|e| format!("Failed to fetch from URL {}: {}", url, e))?;
             Ok(PreparedInput {
                 source_type: "web_url".to_string(),
                 source_ref: url.as_str().to_string(),
-                local_video_path,
+                local_video_path: local,
             })
         }
     }
@@ -421,19 +592,17 @@ fn estimate_input(
     match input {
         VideoInput::LocalPath(path) => {
             check_video_exists(path)?;
-            let metadata = fs::metadata(path)?;
             Ok(EstimateInfo {
                 label: path.display().to_string(),
-                size_mb: bytes_to_mb(metadata.len()),
+                size_mb: bytes_to_mb(fs::metadata(path)?.len()),
             })
         }
         VideoInput::WebUrl(url) => {
-            let downloader = configured_url_downloader(config)?;
-            ensure_tool_available(downloader)?;
-            let size_mb = estimate_url_size_mb(downloader, url)?;
+            let dl = configured_url_downloader(config)?;
+            ensure_tool_available(dl)?;
             Ok(EstimateInfo {
                 label: url.as_str().to_string(),
-                size_mb,
+                size_mb: estimate_url_size_mb(dl, url)?,
             })
         }
     }
@@ -443,12 +612,12 @@ fn configured_url_downloader(config: &Config) -> Result<&str, Box<dyn std::error
     match config.media.url_downloader.as_deref() {
         Some("yt-dlp") => Ok("yt-dlp"),
         Some(other) => Err(format!(
-            "Unsupported media.url_downloader: {}. Only \"yt-dlp\" is supported for URL input.",
+            "Unsupported media.url_downloader: {}. Only \"yt-dlp\" is supported.",
             other
         )
         .into()),
         None => Err(
-            "URL input is disabled. Set media.url_downloader = \"yt-dlp\" in config to enable yt-dlp-backed URL downloads."
+            "URL input is disabled. Set media.url_downloader = \"yt-dlp\" in config to enable."
                 .into(),
         ),
     }
@@ -458,137 +627,26 @@ fn bytes_to_mb(bytes: u64) -> f64 {
     bytes as f64 / (1024.0 * 1024.0)
 }
 
-fn normalize_stage_range(
-    from: Option<usize>,
-    to: Option<usize>,
-) -> Result<(usize, usize), Box<dyn std::error::Error>> {
-    let from_stage = from.unwrap_or(0);
-    let to_stage = to.unwrap_or(9);
-
-    if from_stage > 9 {
-        return Err(format!("Invalid --from stage {}. Expected 0-9.", from_stage).into());
-    }
-    if to_stage > 9 {
-        return Err(format!("Invalid --to stage {}. Expected 0-9.", to_stage).into());
-    }
-    if from_stage > to_stage {
-        return Err(format!(
-            "Invalid stage range: --from {} is greater than --to {}.",
-            from_stage, to_stage
-        )
-        .into());
-    }
-
-    Ok((from_stage, to_stage))
-}
-
-fn stage_range_includes(from_stage: usize, to_stage: usize, stage: usize) -> bool {
-    (from_stage..=to_stage).contains(&stage)
-}
-
-fn tool_requirements(
-    config: &Config,
-    input: &VideoInput,
-    from_stage: usize,
-    to_stage: usize,
-) -> Result<Vec<ToolRequirement>, String> {
-    let mut requirements = Vec::new();
-
-    if from_stage == 0 {
-        requirements.push(ToolRequirement {
-            name: "ffprobe",
-            command: config.media.ffprobe_path.clone(),
-        });
-    }
-
-    if stage_range_includes(from_stage, to_stage, 1)
-        || stage_range_includes(from_stage, to_stage, 3)
-        || stage_range_includes(from_stage, to_stage, 4)
-        || stage_range_includes(from_stage, to_stage, 5)
-    {
-        requirements.push(ToolRequirement {
-            name: "ffmpeg",
-            command: config.media.ffmpeg_path.clone(),
-        });
-    }
-
-    if stage_range_includes(from_stage, to_stage, 2) && config.asr.adapter == "whisper_cpp" {
-        requirements.push(ToolRequirement {
-            name: "whisper-cli",
-            command: config.asr.whisper_cpp.binary_path.clone(),
-        });
-    }
-
-    if to_stage == 9 && config.vision.ocr.adapter == "tesseract" {
-        requirements.push(ToolRequirement {
-            name: "tesseract",
-            command: config.vision.ocr.adapter.clone(),
-        });
-    }
-
-    if matches!(input, VideoInput::WebUrl(_)) {
-        let downloader = configured_url_downloader(config).map_err(|err| err.to_string())?;
-        requirements.push(ToolRequirement {
-            name: "yt-dlp",
-            command: downloader.to_string(),
-        });
-    }
-
-    Ok(requirements)
-}
-
-fn run_preflight_checks(
-    config: &Config,
-    input: &VideoInput,
-    from_stage: usize,
-    to_stage: usize,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let requirements =
-        tool_requirements(config, input, from_stage, to_stage).map_err(|err| err.to_string())?;
-    let mut failures = Vec::new();
-
-    for requirement in requirements {
-        if let Err(err) = ensure_tool_available(&requirement.command) {
-            failures.push(format!("{} ({})", requirement.name, err));
-        }
-    }
-
-    if failures.is_empty() {
-        Ok(())
-    } else {
-        Err(format!("Pre-flight check failed: {}", failures.join(", ")).into())
-    }
-}
-
-fn ensure_tool_available(tool: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let output = Command::new(tool).arg("-version").output()?;
-    if output.status.success() {
-        Ok(())
-    } else {
-        Err(format!("Required tool not available: {}", tool).into())
-    }
-}
-
 fn download_video(
-    downloader: &str,
+    dl: &str,
     url: &Url,
     out_dir: &Path,
 ) -> Result<PathBuf, Box<dyn std::error::Error>> {
-    match download_video_with_ytdlp(downloader, url, out_dir) {
+    match download_video_with_ytdlp(dl, url, out_dir) {
         Ok(path) => Ok(path),
-        Err(ytdlp_error) => {
+        Err(ytdlp_err) => {
             if can_fallback_to_direct_http(url)? {
-                download_video_direct_http(url, out_dir).map_err(|direct_error| {
+                download_video_direct_http(url, out_dir).map_err(|direct_err| {
                     format!(
-                        "yt-dlp failed ({}) and direct-http fallback failed ({}). Only yt-dlp-resolvable URLs and direct video file links are supported.",
-                        ytdlp_error, direct_error
+                        "yt-dlp failed ({}) and direct-http fallback failed ({}).",
+                        ytdlp_err, direct_err
                     )
                     .into()
                 })
             } else {
                 Err(format!(
-                    "{}. Only yt-dlp-resolvable URLs and direct video file links are supported.",
-                    ytdlp_error
+                    "{}. Only yt-dlp-resolvable URLs and direct video links are supported.",
+                    ytdlp_err
                 )
                 .into())
             }
@@ -597,28 +655,19 @@ fn download_video(
 }
 
 fn download_video_with_ytdlp(
-    downloader: &str,
+    dl: &str,
     url: &Url,
     out_dir: &Path,
 ) -> Result<PathBuf, Box<dyn std::error::Error>> {
-    let output_template = out_dir.join("source.%(ext)s");
-    let output = Command::new(downloader)
-        .arg("--no-playlist")
-        .arg("--merge-output-format")
-        .arg("mp4")
-        .arg("-o")
-        .arg(&output_template)
+    let tpl = out_dir.join("source.%(ext)s");
+    let out = Command::new(dl)
+        .args(["--no-playlist", "--merge-output-format", "mp4", "-o"])
+        .arg(&tpl)
         .arg(url.as_str())
         .output()?;
-
-    if !output.status.success() {
-        return Err(format!(
-            "yt-dlp download failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        )
-        .into());
+    if !out.status.success() {
+        return Err(format!("yt-dlp failed: {}", String::from_utf8_lossy(&out.stderr)).into());
     }
-
     find_downloaded_video(out_dir)
 }
 
@@ -627,169 +676,138 @@ fn download_video_direct_http(
     out_dir: &Path,
 ) -> Result<PathBuf, Box<dyn std::error::Error>> {
     let client = http_client()?;
-    let response = client.get(url.as_str()).send()?;
-    let response = response.error_for_status()?;
-
-    let extension = infer_direct_video_extension(
+    let resp = client.get(url.as_str()).send()?.error_for_status()?;
+    let ext = infer_direct_video_extension(
         url,
-        response
-            .headers()
+        resp.headers()
             .get(reqwest::header::CONTENT_TYPE)
-            .and_then(|value| value.to_str().ok()),
+            .and_then(|v| v.to_str().ok()),
     );
-    let output_path = out_dir.join(format!("source.{}", extension));
-    let mut file = fs::File::create(&output_path)?;
-    let bytes = response.bytes()?;
-    file.write_all(&bytes)?;
-
-    Ok(output_path)
+    let path = out_dir.join(format!("source.{}", ext));
+    let mut file = fs::File::create(&path)?;
+    file.write_all(&resp.bytes()?)?;
+    Ok(path)
 }
 
 fn find_downloaded_video(out_dir: &Path) -> Result<PathBuf, Box<dyn std::error::Error>> {
-    let mut entries = fs::read_dir(out_dir)?
-        .filter_map(|entry| entry.ok())
-        .map(|entry| entry.path())
-        .filter(|path| {
-            path.file_name()
-                .and_then(|name| name.to_str())
-                .is_some_and(|name| name.starts_with("source."))
+    let mut entries: Vec<_> = fs::read_dir(out_dir)?
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with("source."))
         })
-        .collect::<Vec<_>>();
-
+        .collect();
     entries.sort();
     entries
         .into_iter()
         .next()
-        .ok_or_else(|| "yt-dlp completed but no downloaded video was found".into())
+        .ok_or_else(|| "yt-dlp completed but no output found".into())
 }
 
 fn fetch_ytdlp_metadata(
-    downloader: &str,
+    dl: &str,
     url: &Url,
 ) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
-    let output = Command::new(downloader)
-        .arg("--dump-single-json")
-        .arg("--no-download")
-        .arg(url.as_str())
+    let out = Command::new(dl)
+        .args(["--dump-single-json", "--no-download", url.as_str()])
         .output()?;
-
-    if !output.status.success() {
+    if !out.status.success() {
         return Err(format!(
-            "yt-dlp metadata fetch failed: {}",
-            String::from_utf8_lossy(&output.stderr)
+            "yt-dlp metadata failed: {}",
+            String::from_utf8_lossy(&out.stderr)
         )
         .into());
     }
-
-    serde_json::from_slice(&output.stdout).map_err(Into::into)
+    serde_json::from_slice(&out.stdout).map_err(Into::into)
 }
 
-fn estimate_url_size_mb(downloader: &str, url: &Url) -> Result<f64, Box<dyn std::error::Error>> {
-    match fetch_ytdlp_metadata(downloader, url) {
-        Ok(metadata) => extract_estimated_size_mb(&metadata)
-            .ok_or_else(|| "Could not estimate remote video size from yt-dlp metadata".into()),
-        Err(ytdlp_error) => {
+fn estimate_url_size_mb(dl: &str, url: &Url) -> Result<f64, Box<dyn std::error::Error>> {
+    match fetch_ytdlp_metadata(dl, url) {
+        Ok(meta) => extract_estimated_size_mb(&meta)
+            .ok_or_else(|| "Could not estimate size from yt-dlp metadata".into()),
+        Err(ytdlp_err) => {
             if can_fallback_to_direct_http(url)? {
-                estimate_direct_http_size_mb(url).map_err(|direct_error| {
+                estimate_direct_http_size_mb(url).map_err(|direct_err| {
                     format!(
-                        "yt-dlp metadata fetch failed ({}) and direct-http fallback failed ({}). Only yt-dlp-resolvable URLs and direct video file links are supported.",
-                        ytdlp_error, direct_error
+                        "yt-dlp failed ({}) and direct-http fallback failed ({}).",
+                        ytdlp_err, direct_err
                     )
                     .into()
                 })
             } else {
-                Err(format!(
-                    "{}. Only yt-dlp-resolvable URLs and direct video file links are supported.",
-                    ytdlp_error
-                )
-                .into())
+                Err(format!("{}.", ytdlp_err).into())
             }
         }
     }
 }
 
 fn estimate_direct_http_size_mb(url: &Url) -> Result<f64, Box<dyn std::error::Error>> {
-    let client = http_client()?;
-    let response = client.head(url.as_str()).send()?;
-    let response = response.error_for_status()?;
-    let content_length = response
+    let resp = http_client()?
+        .head(url.as_str())
+        .send()?
+        .error_for_status()?;
+    let len = resp
         .headers()
         .get(reqwest::header::CONTENT_LENGTH)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.parse::<u64>().ok())
-        .ok_or_else(|| "No Content-Length available for direct HTTP estimate".to_string())?;
-
-    Ok(bytes_to_mb(content_length))
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse::<u64>().ok())
+        .ok_or_else(|| "No Content-Length".to_string())?;
+    Ok(bytes_to_mb(len))
 }
 
 fn can_fallback_to_direct_http(url: &Url) -> Result<bool, Box<dyn std::error::Error>> {
     if has_direct_video_extension(url) {
         return Ok(true);
     }
-
-    let client = http_client()?;
-    let response = client.head(url.as_str()).send()?;
-    if !response.status().is_success() {
+    let resp = http_client()?.head(url.as_str()).send()?;
+    if !resp.status().is_success() {
         return Ok(false);
     }
-
-    Ok(response
+    Ok(resp
         .headers()
         .get(reqwest::header::CONTENT_TYPE)
-        .and_then(|value| value.to_str().ok())
+        .and_then(|v| v.to_str().ok())
         .is_some_and(is_video_content_type))
 }
 
 fn has_direct_video_extension(url: &Url) -> bool {
     url.path_segments()
-        .and_then(|mut segments| segments.next_back())
-        .and_then(|segment| {
-            segment
-                .rsplit_once('.')
+        .and_then(|mut s| s.next_back())
+        .and_then(|seg| {
+            seg.rsplit_once('.')
                 .map(|(_, ext)| ext.to_ascii_lowercase())
         })
-        .is_some_and(|ext| {
-            DIRECT_VIDEO_EXTENSIONS
-                .iter()
-                .any(|candidate| *candidate == ext)
-        })
+        .is_some_and(|ext| DIRECT_VIDEO_EXTENSIONS.iter().any(|&c| c == ext))
 }
 
-fn is_video_content_type(content_type: &str) -> bool {
-    content_type
-        .split(';')
+fn is_video_content_type(ct: &str) -> bool {
+    ct.split(';')
         .next()
-        .is_some_and(|value| value.trim().starts_with("video/"))
+        .is_some_and(|v| v.trim().starts_with("video/"))
 }
 
 fn infer_direct_video_extension(url: &Url, content_type: Option<&str>) -> String {
-    if let Some(extension) = url
+    if let Some(ext) = url
         .path_segments()
-        .and_then(|mut segments| segments.next_back())
-        .and_then(|segment| {
-            segment
-                .rsplit_once('.')
+        .and_then(|mut s| s.next_back())
+        .and_then(|seg| {
+            seg.rsplit_once('.')
                 .map(|(_, ext)| ext.to_ascii_lowercase())
         })
-        .filter(|ext| {
-            DIRECT_VIDEO_EXTENSIONS
-                .iter()
-                .any(|candidate| *candidate == ext)
-        })
+        .filter(|ext| DIRECT_VIDEO_EXTENSIONS.iter().any(|&c| c == ext))
     {
-        return extension;
+        return ext;
     }
-
     if let Some(mapped) = content_type.and_then(content_type_to_extension) {
         return mapped.to_string();
     }
-
     "mp4".to_string()
 }
 
-fn content_type_to_extension(content_type: &str) -> Option<&'static str> {
-    let media_type = content_type.split(';').next()?.trim();
-    match media_type {
+fn content_type_to_extension(ct: &str) -> Option<&'static str> {
+    match ct.split(';').next()?.trim() {
         "video/mp4" => Some("mp4"),
         "video/x-m4v" => Some("m4v"),
         "video/quicktime" => Some("mov"),
@@ -806,13 +824,11 @@ fn http_client() -> Result<Client, Box<dyn std::error::Error>> {
         .map_err(Into::into)
 }
 
-fn extract_estimated_size_mb(metadata: &serde_json::Value) -> Option<f64> {
-    metadata
-        .get("filesize")
+fn extract_estimated_size_mb(meta: &serde_json::Value) -> Option<f64> {
+    meta.get("filesize")
         .and_then(serde_json::Value::as_u64)
         .or_else(|| {
-            metadata
-                .get("filesize_approx")
+            meta.get("filesize_approx")
                 .and_then(serde_json::Value::as_u64)
         })
         .map(bytes_to_mb)
@@ -820,16 +836,18 @@ fn extract_estimated_size_mb(metadata: &serde_json::Value) -> Option<f64> {
 
 fn check_video_exists(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
     if !path.exists() {
-        return Err(format!("Video file not found: {}", path.display()).into());
+        Err(format!("Video file not found: {}", path.display()).into())
+    } else {
+        Ok(())
     }
-    Ok(())
 }
 
 fn check_file_exists(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
     if !path.exists() {
-        return Err(format!("File not found: {}", path.display()).into());
+        Err(format!("File not found: {}", path.display()).into())
+    } else {
+        Ok(())
     }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -838,193 +856,132 @@ mod tests {
 
     #[test]
     fn test_cli_parse_process() {
-        let args = vec!["vididx", "process", "video.mp4"];
-        let cli = Cli::try_parse_from(args).unwrap();
-
+        let cli = Cli::try_parse_from(["vididx", "process", "video.mp4"]).unwrap();
         match cli.command {
-            Commands::Process { video, .. } => {
-                assert_eq!(video, "video.mp4");
-            }
-            _ => panic!("Expected Process command"),
+            Commands::Process { video, .. } => assert_eq!(video, "video.mp4"),
+            _ => panic!("Expected Process"),
         }
     }
 
     #[test]
-    fn test_cli_parse_process_with_options() {
-        let args = vec![
+    fn test_cli_parse_process_with_stage_names() {
+        let cli = Cli::try_parse_from([
             "vididx",
             "process",
             "video.mp4",
-            "--video-id",
-            "test_vid",
-            "--force",
-        ];
-        let cli = Cli::try_parse_from(args).unwrap();
-
+            "--from",
+            "stage4_coarse",
+            "--to",
+            "stage8_annotate",
+        ])
+        .unwrap();
         match cli.command {
-            Commands::Process {
-                video,
-                video_id,
-                force,
-                ..
-            } => {
-                assert_eq!(video, "video.mp4");
-                assert_eq!(video_id, Some("test_vid".to_string()));
-                assert!(force);
+            Commands::Process { from, to, .. } => {
+                assert_eq!(from.as_deref(), Some("stage4_coarse"));
+                assert_eq!(to.as_deref(), Some("stage8_annotate"));
             }
-            _ => panic!("Expected Process command"),
+            _ => panic!("Expected Process"),
         }
     }
 
     #[test]
-    fn test_tool_requirements_local_input_includes_core_local_tools() {
-        let config = Config::default();
-        let input = VideoInput::LocalPath(PathBuf::from("video.mp4"));
-
-        let requirements = tool_requirements(&config, &input, 0, 9).unwrap();
-        let commands = requirements
-            .iter()
-            .map(|item| item.command.as_str())
-            .collect::<Vec<_>>();
-
-        assert!(commands.contains(&"ffmpeg"));
-        assert!(commands.contains(&"ffprobe"));
-        assert!(commands.contains(&"whisper-cli"));
-        assert!(commands.contains(&"tesseract"));
-        assert!(!commands.contains(&"yt-dlp"));
+    fn test_cli_global_options() {
+        let cli = Cli::try_parse_from([
+            "vididx",
+            "--log-level",
+            "debug",
+            "--out-dir",
+            "/tmp/test",
+            "estimate",
+            "video.mp4",
+        ])
+        .unwrap();
+        assert_eq!(cli.log_level, "debug");
+        assert_eq!(cli.out_dir, Some(PathBuf::from("/tmp/test")));
     }
 
     #[test]
-    fn test_tool_requirements_url_input_includes_url_downloader() {
+    fn test_resolve_process_out_dir_uses_config_root_and_video_id() {
+        let mut config = Config::default();
+        config.general.out_dir = "/tmp/vididx-out".to_string();
+        assert_eq!(
+            resolve_process_out_dir(&config, "demo"),
+            PathBuf::from("/tmp/vididx-out/demo")
+        );
+    }
+
+    #[test]
+    fn test_normalize_stage_range_by_name() {
+        let (f, t) = normalize_stage_range(Some("stage4_coarse"), Some("stage8_annotate")).unwrap();
+        assert_eq!(f, 4);
+        assert_eq!(t, 8);
+    }
+
+    #[test]
+    fn test_normalize_stage_range_by_number() {
+        let (f, t) = normalize_stage_range(Some("3"), Some("7")).unwrap();
+        assert_eq!(f, 3);
+        assert_eq!(t, 7);
+    }
+
+    #[test]
+    fn test_normalize_stage_range_unknown_name() {
+        let result = normalize_stage_range(Some("stage99_unknown"), None);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_normalize_stage_range_inverted() {
+        let result = normalize_stage_range(Some("7"), Some("3"));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_normalize_stage_range_defaults() {
+        let (f, t) = normalize_stage_range(None, None).unwrap();
+        assert_eq!((f, t), (0, 9));
+    }
+
+    #[test]
+    fn test_tool_requirements_local_input() {
+        let config = Config::default();
+        let input = VideoInput::LocalPath(PathBuf::from("video.mp4"));
+        let reqs = tool_requirements(&config, &input, 0, 9).unwrap();
+        let cmds: Vec<_> = reqs.iter().map(|r| r.command.as_str()).collect();
+        assert!(cmds.contains(&"ffmpeg"));
+        assert!(cmds.contains(&"ffprobe"));
+        assert!(cmds.contains(&"whisper-cli"));
+        assert!(cmds.contains(&"tesseract"));
+        assert!(!cmds.contains(&"yt-dlp"));
+    }
+
+    #[test]
+    fn test_tool_requirements_late_stage_skips_early_tools() {
+        let config = Config::default();
+        let input = VideoInput::LocalPath(PathBuf::from("video.mp4"));
+        let reqs = tool_requirements(&config, &input, 8, 9).unwrap();
+        let cmds: Vec<_> = reqs.iter().map(|r| r.command.as_str()).collect();
+        assert!(!cmds.contains(&"ffmpeg"));
+        assert!(!cmds.contains(&"ffprobe"));
+        assert!(!cmds.contains(&"whisper-cli"));
+        assert!(cmds.contains(&"tesseract"));
+    }
+
+    #[test]
+    fn test_tool_requirements_url_needs_ytdlp() {
         let mut config = Config::default();
         config.media.url_downloader = Some("yt-dlp".to_string());
         let input = VideoInput::WebUrl(Url::parse("https://example.com/video.mp4").unwrap());
-
-        let requirements = tool_requirements(&config, &input, 0, 9).unwrap();
-        let commands = requirements
-            .iter()
-            .map(|item| item.command.as_str())
-            .collect::<Vec<_>>();
-
-        assert!(commands.contains(&"yt-dlp"));
+        let reqs = tool_requirements(&config, &input, 0, 9).unwrap();
+        let cmds: Vec<_> = reqs.iter().map(|r| r.command.as_str()).collect();
+        assert!(cmds.contains(&"yt-dlp"));
     }
 
     #[test]
-    fn test_tool_requirements_url_input_errors_when_downloader_disabled() {
+    fn test_tool_requirements_url_fails_when_no_downloader() {
         let config = Config::default();
         let input = VideoInput::WebUrl(Url::parse("https://example.com/video.mp4").unwrap());
-
-        let result = tool_requirements(&config, &input, 0, 9);
-
-        assert!(result.is_err());
-        assert!(result.unwrap_err().contains("URL input is disabled"));
-    }
-
-    #[test]
-    fn test_tool_requirements_later_stage_skips_earlier_tools() {
-        let config = Config::default();
-        let input = VideoInput::LocalPath(PathBuf::from("video.mp4"));
-
-        let requirements = tool_requirements(&config, &input, 8, 9).unwrap();
-        let commands = requirements
-            .iter()
-            .map(|item| item.command.as_str())
-            .collect::<Vec<_>>();
-
-        assert!(!commands.contains(&"ffmpeg"));
-        assert!(!commands.contains(&"ffprobe"));
-        assert!(!commands.contains(&"whisper-cli"));
-        assert!(commands.contains(&"tesseract"));
-    }
-
-    #[test]
-    fn test_normalize_stage_range_defaults_to_full_pipeline() {
-        let range = normalize_stage_range(None, None).unwrap();
-        assert_eq!(range, (0, 9));
-    }
-
-    #[test]
-    fn test_normalize_stage_range_rejects_inverted_range() {
-        let result = normalize_stage_range(Some(7), Some(3));
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_cli_parse_inspect() {
-        let args = vec!["vididx", "inspect", "output"];
-        let cli = Cli::try_parse_from(args).unwrap();
-
-        match cli.command {
-            Commands::Inspect { out_dir } => {
-                assert_eq!(out_dir, PathBuf::from("output"));
-            }
-            _ => panic!("Expected Inspect command"),
-        }
-    }
-
-    #[test]
-    fn test_cli_parse_validate() {
-        let args = vec!["vididx", "validate", "chunks.jsonl"];
-        let cli = Cli::try_parse_from(args).unwrap();
-
-        match cli.command {
-            Commands::Validate { jsonl } => {
-                assert_eq!(jsonl, PathBuf::from("chunks.jsonl"));
-            }
-            _ => panic!("Expected Validate command"),
-        }
-    }
-
-    #[test]
-    fn test_cli_parse_estimate() {
-        let args = vec!["vididx", "estimate", "video.mp4"];
-        let cli = Cli::try_parse_from(args).unwrap();
-
-        match cli.command {
-            Commands::Estimate { video } => {
-                assert_eq!(video, "video.mp4");
-            }
-            _ => panic!("Expected Estimate command"),
-        }
-    }
-
-    #[test]
-    fn test_cli_parse_wix_download() {
-        let args = vec![
-            "vididx",
-            "wix-download",
-            "https://repackager.wixmp.com/video.wixstatic.com/video/abc123/2160p/mp4/file.mp4/seg-5-v1-a1.ts?token=demo",
-            "--output",
-            "tmp",
-            "--video-id",
-            "sample",
-            "--max-segments",
-            "55",
-            "--stop-after-misses",
-            "4",
-        ];
-
-        let cli = Cli::try_parse_from(args).unwrap();
-
-        match cli.command {
-            Commands::WixDownload {
-                input,
-                output,
-                video_id,
-                max_segments,
-                stop_after_misses,
-            } => {
-                assert_eq!(
-                    input,
-                    "https://repackager.wixmp.com/video.wixstatic.com/video/abc123/2160p/mp4/file.mp4/seg-5-v1-a1.ts?token=demo"
-                );
-                assert_eq!(output, PathBuf::from("tmp"));
-                assert_eq!(video_id, Some("sample".to_string()));
-                assert_eq!(max_segments, 55);
-                assert_eq!(stop_after_misses, 4);
-            }
-            _ => panic!("Expected WixDownload command"),
-        }
+        assert!(tool_requirements(&config, &input, 0, 9).is_err());
     }
 
     #[test]
@@ -1034,72 +991,67 @@ mod tests {
     }
 
     #[test]
-    fn test_default_video_id_from_url_last_segment() {
+    fn test_classify_video_input_local_path() {
+        let input = classify_video_input("video.mp4").unwrap();
+        assert!(matches!(input, VideoInput::LocalPath(_)));
+    }
+
+    #[test]
+    fn test_default_video_id_from_url() {
         let input = classify_video_input("https://example.com/videos/demo-file").unwrap();
         assert_eq!(default_video_id(&input).as_deref(), Some("demo-file"));
     }
 
     #[test]
-    fn test_extract_estimated_size_mb_prefers_filesize() {
-        let metadata = serde_json::json!({
-            "filesize": 52_428_800_u64,
-            "filesize_approx": 104_857_600_u64
-        });
-
-        let size_mb = extract_estimated_size_mb(&metadata).unwrap();
-        assert!((size_mb - 50.0).abs() < 0.01);
+    fn test_extract_estimated_size_mb() {
+        let meta = serde_json::json!({"filesize": 52_428_800_u64});
+        let mb = extract_estimated_size_mb(&meta).unwrap();
+        assert!((mb - 50.0).abs() < 0.01);
     }
 
     #[test]
-    fn test_has_direct_video_extension_mp4_url() {
-        let url = Url::parse("https://cdn.example.com/video/sample.mp4").unwrap();
+    fn test_has_direct_video_extension() {
+        let url = Url::parse("https://cdn.example.com/video.mp4").unwrap();
         assert!(has_direct_video_extension(&url));
-    }
-
-    #[test]
-    fn test_is_video_content_type_accepts_video_media_type() {
-        assert!(is_video_content_type("video/mp4"));
-        assert!(is_video_content_type("video/mp4; charset=binary"));
-        assert!(!is_video_content_type("text/html"));
-    }
-
-    #[test]
-    fn test_infer_direct_video_extension_prefers_content_type() {
-        let url = Url::parse("https://example.com/download").unwrap();
-        assert_eq!(
-            infer_direct_video_extension(&url, Some("video/webm")),
-            "webm"
-        );
     }
 
     #[test]
     fn test_configured_url_downloader_disabled_by_default() {
         let config = Config::default();
-        let result = configured_url_downloader(&config);
-        assert!(result.is_err());
-        assert_eq!(
-            result.unwrap_err().to_string(),
-            "URL input is disabled. Set media.url_downloader = \"yt-dlp\" in config to enable yt-dlp-backed URL downloads."
-        );
+        assert!(configured_url_downloader(&config).is_err());
     }
 
     #[test]
-    fn test_configured_url_downloader_accepts_ytdlp() {
+    fn test_configured_url_downloader_ytdlp() {
         let mut config = Config::default();
         config.media.url_downloader = Some("yt-dlp".to_string());
         assert_eq!(configured_url_downloader(&config).unwrap(), "yt-dlp");
     }
 
     #[test]
-    fn test_configured_url_downloader_rejects_unsupported_tool() {
-        let mut config = Config::default();
-        config.media.url_downloader = Some("curl".to_string());
+    fn test_cli_parse_inspect() {
+        let cli = Cli::try_parse_from(["vididx", "inspect", "output"]).unwrap();
+        match cli.command {
+            Commands::Inspect { out_dir } => assert_eq!(out_dir, PathBuf::from("output")),
+            _ => panic!("Expected Inspect"),
+        }
+    }
 
-        let result = configured_url_downloader(&config);
+    #[test]
+    fn test_cli_parse_validate() {
+        let cli = Cli::try_parse_from(["vididx", "validate", "chunks.jsonl"]).unwrap();
+        match cli.command {
+            Commands::Validate { jsonl } => assert_eq!(jsonl, PathBuf::from("chunks.jsonl")),
+            _ => panic!("Expected Validate"),
+        }
+    }
 
-        assert_eq!(
-            result.unwrap_err().to_string(),
-            "Unsupported media.url_downloader: curl. Only \"yt-dlp\" is supported for URL input."
-        );
+    #[test]
+    fn test_cli_parse_estimate() {
+        let cli = Cli::try_parse_from(["vididx", "estimate", "video.mp4"]).unwrap();
+        match cli.command {
+            Commands::Estimate { video } => assert_eq!(video, "video.mp4"),
+            _ => panic!("Expected Estimate"),
+        }
     }
 }

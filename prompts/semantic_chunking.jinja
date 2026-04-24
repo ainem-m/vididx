@@ -1,24 +1,24 @@
-Analyze the following transcript and identify semantic boundaries where the content shifts to a different topic or theme.
+あなたは動画字幕を意味単位に分割するアシスタントです。
 
-Transcript (duration {{ duration_sec }}s):
-{{ transcript_text }}
+【入力】以下はタイムスタンプ付き文字起こしです（相対秒数）。
+---
+{% for seg in segments %}[{{ seg.start_sec }}-{{ seg.end_sec }}] {{ seg.text }}
+{% endfor %}---
 
-Target chunk duration: {{ target_min }}s to {{ target_max }}s
+【タスク】
+この区間を「話題転換」「手順切替」「質問→回答」「スライド節」「操作フェーズ変更」の観点で
+意味単位に分割してください。1チャンクの目安は {{ target_min }}〜{{ target_max }}秒です。
 
-Identify semantic chunks by specifying breakpoints. Return a JSON object with the following schema:
+【出力】厳密に以下のJSONオブジェクトのみを出力。前置きや説明は書かない。
 {
   "chunks": [
-    {
-      "start_sec": <number>,
-      "end_sec": <number>,
-      "rationale": "<brief explanation of this chunk's semantic content>"
-    }
+    {"start_sec": <float>, "end_sec": <float>, "rationale": "<短い日本語>"}
   ]
 }
 
-Requirements:
-- Chunks should cover the entire duration [0, {{ duration_sec }}]
-- Each chunk should be between {{ target_min }}s and {{ target_max }}s when possible
-- Breakpoints should align with natural pauses or topic transitions in the transcript
-- Rationales should be concise (1-2 sentences)
-- Return ONLY valid JSON, no markdown or additional text
+制約:
+- start_sec / end_sec は相対秒数（この区間の先頭=0）
+- start_sec は昇順、重複なし
+- 最初のchunkのstart_sec は 0.0
+- 最後のchunkのend_sec は {{ duration_sec }}
+- 隣接chunkはend_sec == 次のstart_sec

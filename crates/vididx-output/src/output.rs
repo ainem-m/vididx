@@ -203,6 +203,7 @@ mod tests {
             title: "Test Title".to_string(),
             summary: "Test summary".to_string(),
             keywords: vec!["test".to_string()],
+            rationale: "test".to_string(),
         }];
 
         let result = write_chunks_jsonl(&chunks, &output_path).await;

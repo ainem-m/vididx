@@ -55,7 +55,10 @@ fn parse_scene_output(output: &str, threshold: f32) -> Result<Vec<SceneChange>, 
             }
         } else if let Some(caps) = pts_time_regex.captures(line) {
             if let Ok(at_sec) = caps[1].parse::<f64>() {
-                changes.push(SceneChange { at_sec, score: threshold as f64 });
+                changes.push(SceneChange {
+                    at_sec,
+                    score: threshold as f64,
+                });
             }
         }
     }

@@ -176,6 +176,8 @@ pub struct NormalizedChunk {
     pub start_sec: f64,
     pub end_sec: f64,
     pub transcript_text: String,
+    /// Why this chunk boundary was placed here (from semantic chunking or fallback).
+    pub rationale: String,
 }
 
 /// Extracted frame with metadata.
@@ -207,6 +209,8 @@ pub struct AnnotatedChunk {
     pub title: String,
     pub summary: String,
     pub keywords: Vec<String>,
+    /// Carried from NormalizedChunk for use in processing_meta.
+    pub rationale: String,
 }
 
 #[cfg(test)]

@@ -136,7 +136,10 @@ fn strip_code_fences(text: &str) -> String {
         // Remove optional language identifier (e.g., "json\n")
         if let Some(newline_pos) = without_fences.find('\n') {
             let maybe_lang = &without_fences[..newline_pos];
-            if maybe_lang.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '-') {
+            if maybe_lang
+                .chars()
+                .all(|c| c.is_alphanumeric() || c == '_' || c == '-')
+            {
                 without_fences[newline_pos + 1..].to_string()
             } else {
                 without_fences.to_string()

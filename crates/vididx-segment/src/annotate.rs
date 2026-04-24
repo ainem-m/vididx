@@ -31,6 +31,7 @@ pub async fn annotate_chunk(
                 title: annotation.title,
                 summary: annotation.summary,
                 keywords: annotation.keywords,
+                rationale: chunk.rationale.clone(),
             }),
             Err(_) => Ok(create_fallback_annotation(chunk)),
         },
@@ -95,7 +96,8 @@ fn create_fallback_annotation(chunk: &NormalizedChunk) -> AnnotatedChunk {
         transcript_text: chunk.transcript_text.clone(),
         title: default_title,
         summary: default_summary,
-        keywords: vec!["content".to_string()],
+        keywords: vec![],
+        rationale: chunk.rationale.clone(),
     }
 }
 
@@ -136,13 +138,14 @@ mod tests {
             start_sec: 0.0,
             end_sec: 50.0,
             transcript_text: "This is a test transcript with some content.".to_string(),
+            rationale: "test rationale".to_string(),
         };
 
         let result = create_fallback_annotation(&chunk);
         assert_eq!(result.chunk_id, "test_chunk");
         assert!(!result.title.is_empty());
         assert!(!result.summary.is_empty());
-        assert_eq!(result.keywords.len(), 1);
+        assert_eq!(result.rationale, "test rationale");
     }
 
     #[test]
@@ -156,6 +159,7 @@ mod tests {
                 "This is a very long transcript that should be truncated when used as a title \
                                because it exceeds the maximum title length of forty characters."
                     .to_string(),
+            rationale: "test".to_string(),
         };
 
         let result = create_fallback_annotation(&chunk);
